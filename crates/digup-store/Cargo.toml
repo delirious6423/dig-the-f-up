@@ -1,0 +1,12 @@
+[package]
+name = "digup-store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+half.workspace = true
+rayon.workspace = true
+rusqlite.workspace = true
+digup-core.workspace = true

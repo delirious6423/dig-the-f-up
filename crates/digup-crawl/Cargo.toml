@@ -1,0 +1,13 @@
+[package]
+name = "digup-crawl"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Parallel filesystem crawler, file classification and folder-selection rules (port of DigUpKit Crawler/Rules/FolderSelection)"
+
+[dependencies]
+rayon = { workspace = true }
+regex = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

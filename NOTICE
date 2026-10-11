@@ -1,0 +1,9 @@
+This project is a Rust port of DigUp (https://github.com/ARahim3/DigUp),
+Copyright (c) ARahim3, released under the MIT License.
+
+The on-disk index schema (version 5), search scoring, prompts and indexing
+constants are taken from that project's Swift sources so that indexes and
+search quality stay comparable. Keep DigUp's MIT copyright notice with any
+redistribution of this code.
+
+Also used: llama.cpp (MIT), EmbeddingGemma 2 by Google DeepMind (Apache 2.0).

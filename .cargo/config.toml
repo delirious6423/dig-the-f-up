@@ -1,0 +1,3 @@
+[env]
+# Must match CMAKE_OSX_DEPLOYMENT_TARGET in scripts/build-llama.sh.
+MACOSX_DEPLOYMENT_TARGET = "14.0"
