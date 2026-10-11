@@ -6,3 +6,4 @@ vendor/
 models/
 *.log
 .DS_Store
+baseline/
