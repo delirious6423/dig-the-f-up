@@ -125,3 +125,52 @@ Random unit vectors and a 2000-word synthetic vocabulary (70% text / 20% image /
 | 1M | 33.7 s | 2.4 GB | 8.4-10.4 s | 17.1 | 39-46 | 138 (was 7504) | 72 (was 182) |
 
 The first FTS implementation joined every matched row into `segments` (341k rows for the common word at 1M); `keyword_stage` now takes the top 1000 rowids by bm25 from `fts` alone and joins only the rows it walks. Rankings are unchanged: `tests/fts_equivalence.rs` (seeded 20k segments, orphan rows, both caps, Arabic/Bengali, prefixes) compares against the kept legacy SQL, and `scripts/compare-swift-search.py` still gives 126/126 identical top-10. Set `DIGUP_SEARCH_TRACE=1` for per-stage timings. Swift's search was not measured at this scale (it was not run on a 1M index), so no speed-up over Swift is claimed here.
+
+## R1. Resident Searcher vs per-query build (2026-10-12, M4 10 cores, n=1 per size, synthetic data)
+
+Machine: `sysctl -n hw.model hw.memsize` gives `Mac16,3` and `17179869184` (16 GB); chip Apple M4, 10 cores, macOS 26.
+Build: `--release`, NEON. Rayon threads 10.
+
+Commands (same binary, one run per size):
+```bash
+cargo run --release -q -p digup-search --example resident_bench -- 100000  --db <scratch>/resident-100k.sqlite --churn 30
+cargo run --release -q -p digup-search --example resident_bench -- 1000000 --db <scratch>/resident-1m.sqlite  --churn 30
+```
+The synthetic DBs were deleted after each run. The DB is 70% text, 20% image, 10% audio, f16 768-d vectors.
+Fresh = `IndexStore::open` + `Searcher::new` per query (what the old engine did). Cached = one `OwnedSearcher` kept
+across queries, reloaded only when `is_current()` is false. Query text and vector are fixed; 200 queries per phase.
+
+Load gate: each phase starts only when the 1-minute load is below 4 (wait up to 25 min). Load labels are from the
+START/END lines of the logs. Results marked LOADED are **not final**.
+
+| Phase | 100k load (start -> end) | 100k result | 1M load (start -> end) | 1M result |
+|---|---|---|---|---|
+| build | 17.9 -> 17.9 (LOADED) | 1.59 s, 0.246 GB | 1.62 -> 1.69 (ok) | 37.2 s, 2.449 GB |
+| 1. fresh per query (n=20) | 3.59 -> 3.46 (ok) | open+load p50 140.5 ms, p95 156.2; search p50 15.3, p95 23.3; total p50 155.4, p95 172.4 ms | 1.72 -> 4.46 (LOADED) | open+load p50 5595 ms, p95 8254; search p50 227, p95 384; total p50 5652, p95 8722 ms |
+| 2. cached initial load | 3.46 (ok) | 141.7 ms | 3.93 (ok) | 2977 ms |
+| 2. cached first query | 3.46 (ok) | 17.7 ms | 3.93 -> 3.64 (ok) | 145 ms |
+| 2. cached query (n=200) | 3.46 (ok) | p50 13.3 ms, p95 19.0 ms | 3.93 -> 3.64 (ok) | p50 74.8 ms, p95 130.1 ms |
+| 3. is_current (n=1000) | 3.46 (ok) | p50 1.0 us, p95 1.0 us | 3.64 (ok) | p50 1.1 us, p95 1.2 us |
+| 4. identity, cached vs fresh (50 queries) | 3.46 -> 4.23 (LOADED) | 0 mismatches, 50/50 non-empty | 3.64 -> 4.49 (LOADED) | 0 mismatches, 50/50 non-empty |
+| 5. rebuild detect after commit by another connection (n=5) | 3.66 (ok) | 0.0 us p50 | 3.93 -> 2.65 (ok) | 0.1 us p50 |
+| 5. rebuild (open + load) after commit (n=5) | 3.66 (ok) | p50 102.4 ms, p95 125.3 ms | 3.93 -> 2.65 (ok) | p50 13186 ms, p95 20731 ms |
+| 5. query right after rebuild (n=5) | 3.66 (ok) | p50 16.3 ms, p95 18.8 ms | 3.93 -> 2.65 (ok) | p50 570 ms, p95 1149 ms |
+| 6. churn: 1 segment committed per second for 30 s | 3.66 -> 2.56 (ok) | 30 commits, 199 queries, 30 rebuilds. No-rebuild query p50 26.7 ms, p95 36.6 ms (n=169). Query incl. rebuild p50 136.6 ms, p95 196.0 ms (n=30). Rebuild only p50 120.5 ms, p95 183.7 ms | 2.65 -> 4.22 (LOADED) | 30 commits, 15 queries, 14 rebuilds. Query incl. rebuild p50 1430 ms, p95 8591 ms (n=14). Rebuild only p50 1376 ms, p95 8479 ms |
+
+Notes:
+- Phase 5 at 1M (rebuild p50 13.2 s) and the churn rebuild at 1M (p50 1.4 s) differ by about 10x. Both ran at load
+  2.6 to 4 on a 16 GB machine with other apps running, so the spread is probably memory/IO pressure. It is not explained
+  by this run and is not a final number.
+- Churn at 1M completed only 15 queries in 30 s because each rebuild blocks the query path.
+
+Verdict:
+- With the index idle, the resident Searcher removes the per-query open+load cost. At 100k that is about 140 ms of a
+  155 ms fresh query (p50), so cached queries are about 12x faster (13.3 ms p50). At 1M the same gap is about 5.6 s
+  (fresh, loaded) against 75 ms cached p50. The fresh 1M figure is LOADED, so treat the ratio as indicative only.
+- Results are identical: 0 mismatches over 50 queries at both sizes.
+- `is_current()` costs about 1 us, so checking it per query is free.
+- **Rebuild-on-every-commit during active indexing is unchanged.** Each commit by another connection still forces a
+  full reload (100k about 120 ms; 1M about 1.4 s p50 but with a long tail under load). The cache does not help while
+  files are being indexed. It only helps between commits. At 1M the churn test shows that rebuilds dominate the
+  query path during active indexing. Incremental Searcher updates are the only fix for that case (not done here).
+- Estimates: none. All numbers above are measured on this machine, once per size.
