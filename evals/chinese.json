@@ -1,0 +1,15 @@
+{"base":"~/DigUpTestbed/zh","queries":[
+{"q":"周末去海边散步吃海鲜","expect":["天气计划_简体.txt","天氣計劃_繁體.txt","天气_简体.rtf"],"tag":"zh-sentence"},
+{"q":"週末去海邊散步吃海鮮","expect":["天气计划_简体.txt","天氣計劃_繁體.txt","天气_简体.rtf"],"tag":"zh-sentence"},
+{"q":"weekend walk by the sea and seafood dinner","expect":["天气计划_简体.txt","天氣計劃_繁體.txt","天气_简体.rtf"],"tag":"en->zh"},
+{"q":"产品发布推迟 支付系统问题","expect":["会议纪要_简体.md","會議紀要_繁體.md","會議_繁體.docx"],"tag":"zh-sentence"},
+{"q":"產品發布推遲 支付系統問題","expect":["会议纪要_简体.md","會議紀要_繁體.md","會議_繁體.docx"],"tag":"zh-sentence"},
+{"q":"product launch delayed because of payment system problems","expect":["会议纪要_简体.md","會議紀要_繁體.md","會議_繁體.docx"],"tag":"en->zh"},
+{"q":"咖啡店收据","expect":["咖啡店收据.txt","收据.pdf"],"tag":"zh-word"},
+{"q":"coffee shop receipt latte and cake","expect":["咖啡店收据.txt","收据.pdf"],"tag":"en->zh"},
+{"q":"量子計算","expect":["量子計算.txt"],"tag":"zh-word"},
+{"q":"量子计算","expect":["量子計算.txt"],"tag":"simp->trad"},
+{"q":"quantum computing exponential speedup","expect":["量子計算.txt"],"tag":"en->zh"},
+{"q":"天气","expect":["天气计划_简体.txt","天氣計劃_繁體.txt","天气_简体.rtf"],"tag":"zh-substring"},
+{"q":"支付","expect":["会议纪要_简体.md","會議紀要_繁體.md","會議_繁體.docx"],"tag":"zh-substring"}
+]}

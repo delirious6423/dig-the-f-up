@@ -1,0 +1,20 @@
+[package]
+name = "digup-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+digup-core = { workspace = true }
+digup-embed = { path = "../digup-embed" }
+digup-index = { path = "../digup-index" }
+digup-models = { path = "../digup-models" }
+digup-search = { path = "../digup-search" }
+digup-store = { path = "../digup-store" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+tempfile = { workspace = true }

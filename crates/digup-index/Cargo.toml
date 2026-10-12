@@ -1,0 +1,27 @@
+[package]
+name = "digup-index"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = ["llama"]
+# Implements `Embed` for the real llama.cpp embedder. Off for fast tests with a fake embedder.
+llama = ["dep:digup-embed"]
+
+[dependencies]
+anyhow.workspace = true
+rayon.workspace = true
+digup-core.workspace = true
+digup-crawl = { path = "../digup-crawl" }
+digup-store = { path = "../digup-store" }
+digup-text = { path = "../digup-text" }
+digup-extract-text = { path = "../digup-extract-text" }
+digup-extract-image = { path = "../digup-extract-image" }
+digup-extract-audio = { path = "../digup-extract-audio" }
+digup-extract-pdf = { path = "../digup-extract-pdf" }
+digup-extract-video = { path = "../digup-extract-video" }
+digup-ocr = { path = "../digup-ocr" }
+digup-embed = { path = "../digup-embed", optional = true }
+serde_json = "1"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }

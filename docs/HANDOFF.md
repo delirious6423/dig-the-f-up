@@ -103,42 +103,40 @@ any report; don't oversell "Rust is faster".
 
 ---------------------------------------------------------------------------------------------------
 
-## 4. Current state
+## 4. Current state (updated 2026-10-11, end of the first autonomous session)
 
-Workspace: Cargo, edition 2021, release profile `lto="fat"`, `codegen-units=1`, `panic="abort"`, `debug=1`.
+Everything below runs on Apple Silicon macOS with Metal. 200 tests pass (`cargo test --workspace --release`, parity
+test included); `cargo clippy --workspace --all-targets --release` is clean. The work is NOT committed beyond commit 3c51112.
 
-| Crate | Status | What it is | Tests |
-|---|---|---|---|
-| `digup-core` | done | `FileKind`/`SegmentKind`/`Modality`/`FileState` enums with the exact DB strings, `DIM=768`, `SCHEMA_VERSION=5`, `query_prompt`, `doc_prompt` | 2 |
-| `digup-store` | partial | schema v5 DDL (exact), pragmas (WAL, synchronous NORMAL, busy_timeout 5000, FK on), f16 encode/decode, `VectorIndex` (load/push/scores in 3 modes), `top_k`; `examples/bench_scan` | 4 (incl. Bengali/Arabic FTS5 tokenizer check on bundled SQLite) |
-| `digup-crawl` | done | extension+magic classification (replaces macOS UTType), skip rules, project-marker rule (screenshots only), dataset detection (300+ files, 70% machine-made names), screenshot name rules, `is_secret`/`classify_code`, `FolderSelection`, rayon parallel crawler yielding `{path,kind,size,mtime,inode,device}`; `examples/crawl_bench` | 26 (16 rules + 10 folder-selection, ported from Swift) |
-| `digup-llama-sys` | done | `build.rs`: links the static libs from `./build-llama`, bindgen over `llama.h`/`mtmd.h`/`mtmd-helper.h`; Metal/CUDA/Vulkan/HIP/BLAS libs picked up if present | n/a |
-| `digup-embed` | done (CPU verified; Metal/CUDA/Vulkan unverified) | `Embedder`: `new(text, Some(mmproj)|None, &Options)`, `embed_texts`, `embed_image_file/_rgb`, `embed_audio_file/_samples`; `sizing.rs` = `target_size` + bit-exact Pillow bicubic | 6 unit + 1 parity |
+| Crate | Status | Notes |
+|---|---|---|
+| `digup-core`, `digup-text` | done | enums/consts/prompts; text normalization, tokenizer helpers (NFKC, Arabic folding, `is_word_char` keeps virama/combining marks) |
+| `digup-store` | done | `IndexStore` (schema v5, insert/requeue/move/delete/prune/adopt/finish, `add_segments_and_finish` single transaction), NEON/AVX2/AVX-512/lanes scan kernels (x86 kernels UNTESTED: no AVX2 under Rosetta) |
+| `digup-search` | done | `Searcher` (z-score fusion, FTS, code index with `CodeLookup`/focus); same top-10 order as Swift on all 126 eval queries |
+| `digup-crawl` | done | now reads the macOS `kMDItemIsScreenCapture` xattr |
+| `digup-extract-text/-image/-audio` | done | docs (RTF honours `\fcharset`/`\ansicpg`), code, images, audio. Gaps: legacy `.doc` unsupported; lossy audio untested |
+| `digup-extract-pdf` | macOS only | PDFKit via objc2, rotation handled; other OSes return Unsupported until pdfium is wired |
+| `digup-extract-video` | stopgap | shells out to ffmpeg/ffprobe, streams frames and dedups while reading; frame interval 3.0 s hardcoded in options |
+| `digup-ocr` | macOS only | Apple Vision via objc2; other OSes return None (Q4: `ocrs`/Windows.Media.Ocr still to do) |
+| `digup-embed`, `digup-llama-sys` | done | Metal parity 1.000; `examples/bench_embed` |
+| `digup-index` | done | `sync`, `prepare`, `commit`, `run` (rayon prepare + one embed thread), `service` (scheduler loop for the app) |
+| `digup-models` | done | locate + resumable verified download; `digup download` |
+| `digup-cli` | partly | `index`, `search` (`--json`, `code:`), `status`, `eval`, `estimate`, `download`. Missing: `index-service` front end (library exists), `worker` (not needed: the embedder runs in-process) |
 
-**Parity result (the key de-risk), CPU x86 vs the Swift/Metal reference vectors, threshold 0.999:**
-document 0.99977, document-long 0.99991, frame-70 0.99988, photo-140 0.99994, query 0.99992, query-ar 0.99992,
-query-bn 0.99993, screen-280 0.99995, speech 0.99967. The port is the same model computing the same thing.
+Evidence (details and commands in `docs/BENCHMARKS.md`): eval ALL R@1/R@5 equals the Swift app on synthetic 0.95/1.00,
+multilingual 0.92/0.98 and code 1.00/1.00; Chinese (simp+trad) 0.92/1.00; first index pass of the small testbed 25 s
+vs 38.8 s Swift; Metal is 3.4-6.3x faster than CPU-only on this M4.
 
-**An independent opus review of `digup-embed` found and I fixed:** panic on zero-sized image in `target_size`; a bitmap
-leak when a text-only embedder is asked for an image; possible `from_raw_parts(null,0)` UB on empty media; leaks on
-error paths in `Embedder::new`; log filter printing INFO continuation lines; i32 casts in the tokenizer. No UB found on
-normal paths. `unsafe impl Send` (not Sync) is sound because all mutation is `&mut self`.
+**Update 2026-10-12:** E2 desktop shell exists in `app/` (Tauri 2, static front end): search, kind chips, thumbnails, first-run welcome panel, folder/pause controls, model download, open-at-PDF-page / QuickTime / IINA moment (compile- and unit-tested only), unsigned arm64 `.app` bundle builds (`app/README.md`). Search keyword stage is 54x faster at 1M segments with identical rankings (BENCHMARKS B3). Off-Mac backends written but never run against the real libraries: pdfium (`digup-extract-pdf/src/pdfium.rs`, set `DIGUP_PDFIUM_DIR`, no cwd search) and `ocrs` OCR (`digup-ocr/src/ocrs_backend.rs`, set `DIGUP_OCR_MODELS`; model URLs in its module doc); both compile-check for x86_64-linux. Still open: x86 scan kernels on real hardware (compile-checked for x86_64-linux only), Windows/Linux, signing/notarization, the GUI has not been exercised end to end with a model.
 
-**Not started:** the indexing pipeline; all media extractors (images/PDF/audio/video/docs/OCR); the searcher and
-ranking; incremental sync/move detection; long-file stepping; the CLI; the desktop app; model downloader; updater;
-evals harness; Windows/Linux GPU builds; CI; packaging.
+**Next, in order:** (1) E2 desktop shell (Tauri 2, Q3 default) on top of `digup_index::service` and `digup-search`;
+(2) E3 Windows/Linux: pdfium (Q5), OCR backends (Q4), ffmpeg bundling, x86 scan kernels on real hardware, run the new
+`.github/workflows/ci.yml` (never run yet; Windows job is allowed to fail); (3) larger-corpus benchmarks (real photos/PDFs,
+100k+ vectors) and profiling with samply; (4) E4 packaging. Image/audio embedding is GPU-bound (about 0.22 s per 140-token
+image on Metal), so the remaining levers are in llama.cpp/mtmd batching, not in our code.
 
-**Known gaps/risks in what exists (all flagged, none blocking):**
-- `digup-llama-sys/build.rs` on **macOS was never run**: the framework list (`Accelerate`, `Metal`, `Foundation`,
-  `MetalKit`) and `c++` linking are written from DigUp's `CLlama` modulemap and are untested. First thing to verify.
-- On **Windows** the `.lib` names and per-config `Release/` subdirs are handled speculatively (untested); on Linux it
-  links `stdc++ gomp m pthread dl` assuming `GGML_OPENMP=ON`.
-- `digup-crawl`: inode/device are 0 on Windows (std's file-index API is unstable), so move detection must fall back
-  to (size, mtime, name) there. `git ls-files` ignore filtering for the code index, the macOS screen-capture xattr,
-  iCloud placeholders (only `SF_DATALESS` on macOS) and the Windows hidden attribute are **not** implemented.
-- `digup-store` has the schema, codec and scan but **no `IndexStore` API** yet (insert/delete/move/pending/reset/adopt,
-  fingerprint handling, prepared statements) and no `Searcher`.
-- The scan benchmark uses random vectors; real vectors are clustered, which doesn't change dense-scan speed.
+**Needs the owner:** git remote / repo name and visibility (Q2); whether to commit the uncommitted work; LICENSE holder
+name (placeholder "digup-rs contributors"); a Windows/Linux machine or CI to verify non-Mac builds.
 
 ---------------------------------------------------------------------------------------------------
 

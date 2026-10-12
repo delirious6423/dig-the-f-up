@@ -60,9 +60,9 @@ fn coefficients(in_size: usize, out_size: usize) -> Coeffs {
         let first = ((center - support + 0.5) as i64).max(0) as usize;
         let count = (((center + support + 0.5) as i64) as usize).min(in_size) - first;
         let mut total = 0.0;
-        for x in 0..size {
-            row[x] = if x < count { filter(((x + first) as f64 - center + 0.5) / filter_scale) } else { 0.0 };
-            total += row[x];
+        for (x, cell) in row.iter_mut().enumerate().take(size) {
+            *cell = if x < count { filter(((x + first) as f64 - center + 0.5) / filter_scale) } else { 0.0 };
+            total += *cell;
         }
         for x in 0..size {
             let w = if x < count && total != 0.0 { row[x] / total } else { row[x] };

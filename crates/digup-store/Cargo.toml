@@ -10,3 +10,5 @@ half.workspace = true
 rayon.workspace = true
 rusqlite.workspace = true
 digup-core.workspace = true
+digup-text = { path = "../digup-text" }
+serde_json = "1"

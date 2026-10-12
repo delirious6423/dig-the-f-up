@@ -306,8 +306,44 @@ pub fn is_secret(name: &str) -> bool {
     SECRET_PREFIXES.iter().any(|p| lower.starts_with(p))
 }
 
-/// Rules.swift:138-145 (name fallback only; the macOS kMDItemIsScreenCapture xattr is not read on this port).
+#[cfg(target_os = "macos")]
+mod xattr {
+    use std::ffi::{c_char, c_int, c_void, CString};
+    use std::os::unix::ffi::OsStrExt;
+    use std::path::Path;
+
+    extern "C" {
+        fn getxattr(path: *const c_char, name: *const c_char, value: *mut c_void, size: usize, position: u32, options: c_int) -> isize;
+        #[cfg(test)]
+        pub fn setxattr(path: *const c_char, name: *const c_char, value: *const c_void, size: usize, position: u32, options: c_int) -> c_int;
+    }
+
+    /// True when the file carries macOS's `kMDItemIsScreenCapture` attribute (it survives moves and copies).
+    pub fn is_screen_capture(path: &Path) -> bool {
+        let (Ok(p), Ok(n)) = (CString::new(path.as_os_str().as_bytes()), CString::new("com.apple.metadata:kMDItemIsScreenCapture")) else {
+            return false;
+        };
+        // SAFETY: both strings are NUL-terminated; a null buffer with size 0 only asks for the attribute's length.
+        unsafe { getxattr(p.as_ptr(), n.as_ptr(), std::ptr::null_mut(), 0, 0, 0) > 0 }
+    }
+
+    #[cfg(test)]
+    pub fn mark_screen_capture(path: &Path) {
+        let p = CString::new(path.as_os_str().as_bytes()).unwrap();
+        let n = CString::new("com.apple.metadata:kMDItemIsScreenCapture").unwrap();
+        let v = b"1";
+        // SAFETY: valid NUL-terminated strings and a 1-byte buffer.
+        let r = unsafe { setxattr(p.as_ptr(), n.as_ptr(), v.as_ptr().cast(), 1, 0, 0) };
+        assert_eq!(r, 0, "setxattr failed");
+    }
+}
+
+/// Rules.swift:138-145: the macOS `kMDItemIsScreenCapture` attribute (macOS only), then the file-name prefixes.
 pub fn is_screenshot(path: &Path) -> bool {
+    #[cfg(target_os = "macos")]
+    if xattr::is_screen_capture(path) {
+        return true;
+    }
     let name = file_name(path);
     SCREENSHOT_PREFIXES.iter().any(|p| name.starts_with(p))
 }
@@ -348,7 +384,7 @@ pub fn code_skip_reason_for_folder(path: &Path) -> Option<&'static str> {
 pub fn is_project_listing<'a, I: IntoIterator<Item = &'a str>>(names: I) -> bool {
     names.into_iter().any(|n| {
         PROJECT_MARKERS.contains(&n)
-            || n.rfind('.').map_or(false, |i| i > 0 && PROJECT_BUNDLE_EXTENSIONS.contains(&&n[i + 1..]))
+            || n.rfind('.').is_some_and(|i| i > 0 && PROJECT_BUNDLE_EXTENSIONS.contains(&&n[i + 1..]))
     })
 }
 
@@ -413,3 +449,20 @@ pub fn dataset_folders(
 
 /// Default dataset minimum (Rules.swift:163).
 pub const DATASET_MINIMUM: usize = 300;
+
+#[cfg(all(test, target_os = "macos"))]
+mod xattr_tests {
+    use super::*;
+
+    #[test]
+    fn screen_capture_attribute_makes_a_screenshot() {
+        let dir = std::env::temp_dir().join(format!("digup-xattr-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let plain = dir.join("holiday.png");
+        std::fs::write(&plain, b"x").unwrap();
+        assert!(!is_screenshot(&plain));
+        xattr::mark_screen_capture(&plain);
+        assert!(is_screenshot(&plain));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

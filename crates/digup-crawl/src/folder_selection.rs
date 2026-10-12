@@ -52,7 +52,7 @@ impl FolderSelection {
         for folder in self.kept_and_chosen() {
             let ok = (path == folder || Self::is_inside(path, &folder))
                 && Self::is_searched_in(path, std::slice::from_ref(&folder), &self.skipped);
-            if ok && best.as_ref().map_or(true, |b| char_count(b) < char_count(&folder)) {
+            if ok && best.as_ref().is_none_or(|b| char_count(b) < char_count(&folder)) {
                 best = Some(folder);
             }
         }

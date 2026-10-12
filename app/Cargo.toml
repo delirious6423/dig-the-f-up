@@ -1,0 +1,39 @@
+[package]
+name = "digup-app"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Separate project: not part of the repo-root workspace.
+[workspace]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+digup-engine = { path = "../crates/digup-engine" }
+digup-models = { path = "../crates/digup-models" }
+digup-text = { path = "../crates/digup-text" }
+digup-extract-pdf = { path = "../crates/digup-extract-pdf" }
+url = "2"
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tauri-plugin-opener = "2"
+tauri-plugin-global-shortcut = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+dirs = "5"
+base64 = "0.22"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp", "bmp", "tiff"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSAppleEventDescriptor", "NSBundle", "NSString", "NSURL", "objc2-core-services"] }
+objc2-app-kit = { version = "0.3", features = ["NSWorkspace", "NSRunningApplication", "block2"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+opt-level = 3

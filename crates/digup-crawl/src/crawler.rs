@@ -142,10 +142,7 @@ pub fn crawl<P: AsRef<Path>>(roots: &[P], options: &CrawlOptions) -> CrawlReport
     let roots: Vec<String> = roots.iter().map(|r| r.as_ref().to_string_lossy().into_owned()).collect();
     let roots = &roots[..];
     if options.threads > 0 {
-        match rayon::ThreadPoolBuilder::new().num_threads(options.threads).build() {
-            Ok(pool) => return pool.install(|| crawl_inner(roots, options)),
-            Err(_) => {}
-        }
+        if let Ok(pool) = rayon::ThreadPoolBuilder::new().num_threads(options.threads).build() { return pool.install(|| crawl_inner(roots, options)) }
     }
     crawl_inner(roots, options)
 }
@@ -234,7 +231,7 @@ fn crawl_inner(roots: &[String], options: &CrawlOptions) -> CrawlReport {
 }
 
 fn is_package_dir(name: &str) -> bool {
-    name.rfind('.').map_or(false, |i| i > 0 && PACKAGE_EXTENSIONS.contains(&&name[i + 1..]))
+    name.rfind('.').is_some_and(|i| i > 0 && PACKAGE_EXTENSIONS.contains(&&name[i + 1..]))
 }
 
 /// Big directories split their file work across threads in chunks of this size.
@@ -262,7 +259,7 @@ fn walk_dir<'s>(ctx: &'s Ctx<'s>, dir: &Path, scope: &rayon::Scope<'s>, sink: &'
         if name.starts_with('.') {
             continue; // .skipsHiddenFiles
         }
-        let is_dir = ft.map_or(false, |t| t.is_dir());
+        let is_dir = ft.is_some_and(|t| t.is_dir());
         if !is_dir {
             files.push(e);
             continue;
@@ -331,7 +328,7 @@ fn visit_file(ctx: &Ctx, name: &str, path: &Path, out: &mut Partial) {
     }
     if o.code {
         // Crawler.swift:92-104. (The "ignored by git" step is not ported.)
-        let is_nb = path.extension().map_or(false, |e| e.eq_ignore_ascii_case("ipynb"));
+        let is_nb = path.extension().is_some_and(|e| e.eq_ignore_ascii_case("ipynb"));
         let limit = if is_nb { o.max_notebook_bytes } else { o.max_code_bytes };
         if md.len() as i64 > limit {
             return out.skip("too big to be written by hand");

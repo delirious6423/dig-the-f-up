@@ -1,0 +1,995 @@
+//! Port of Searcher.swift: hybrid search. Meaning (cosine similarity, put on one scale per query as z-scores) is fused
+//! with words (FTS5 over the same index). The layout is dense (one f16 matrix, per-row modality and file-slot arrays,
+//! the scan parallel in digup-store); the results are those of the Swift algorithm.
+
+use std::collections::{HashMap, HashSet};
+use std::time::Instant;
+
+use anyhow::Result;
+use digup_core::{FileKind, Modality, SegmentKind, DIM};
+use digup_store::{ScanMode, VectorIndex};
+use rusqlite::{Connection, OptionalExtension};
+use unicode_segmentation::UnicodeSegmentation;
+
+use crate::{code_lookup, text};
+
+/// Scale rows that don't set the scale (Model.swift: `bigPDFPages`, `pdfStep`, `docStep`): the later pages of a long
+/// PDF and the later passages of a long document are scored, but leave the averages and the deviation alone.
+const BIG_PDF_PAGES: i64 = 50;
+const PDF_STEP: i64 = 30;
+const DOC_STEP: i64 = 40;
+
+/// Minimum vectors in a modality for its own average (`modalityMeans`); smaller groups take the average of all.
+const MIN_MODALITY_ROWS: usize = 20;
+/// Floor of the standard deviation (`meaning`).
+const DEVIATION_FLOOR: f64 = 0.02;
+/// Modalities in dense index order (`modality_index`).
+const MODALITIES: usize = 4;
+/// Keyword candidates: the first 100 files of the FTS result, and FTS rows read.
+const MAX_WORD_FILES: usize = 100;
+const MAX_FTS_ROWS: usize = 1000;
+
+/// Word weights (`Searcher.wordWeight`, normal and lookup): meaning counts 1 normally, 0.5 for a lookup, and the
+/// words count double for a lookup.
+pub const DEFAULT_WORD_WEIGHT: f64 = 2.0;
+/// Code's words count for less: they're everywhere in code (`Searcher.codeWordWeight`).
+pub const CODE_WORD_WEIGHT: f64 = 1.0;
+
+#[derive(Debug, Clone)]
+pub struct SearchOptions {
+    /// Kinds to search; `None` searches all.
+    pub kinds: Option<HashSet<FileKind>>,
+    pub limit: usize,
+    /// Meaning counts for a file when its best segment stands this many standard deviations above the scale.
+    pub z_gate: f64,
+    /// How much finding the words counts against meaning; `None` is 2.0, or 1.0 for the code index.
+    pub word_weight: Option<f64>,
+    /// Whether the last word is a prefix ("being typed").
+    pub prefix_last: bool,
+}
+
+impl Default for SearchOptions {
+    fn default() -> Self {
+        Self { kinds: None, limit: 20, z_gate: 2.0, word_weight: None, prefix_last: false }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SearchHit {
+    pub file_id: i64,
+    pub path: String,
+    pub kind: FileKind,
+    /// Fused rank score, for ordering only.
+    pub score: f64,
+    /// How far the best segment stands out for this query.
+    pub z: Option<f64>,
+    pub cosine: Option<f64>,
+    /// 1-based rank among keyword matches.
+    pub keyword_rank: Option<usize>,
+    pub segment: SegmentKind,
+    /// The segment the hit points at.
+    pub segment_id: i64,
+    pub loc: Option<f64>,
+    pub loc_end: Option<f64>,
+    pub excerpt: Option<String>,
+    /// Modification time (seconds since 1970).
+    pub modified: f64,
+    pub size: i64,
+    pub info: HashMap<String, String>,
+    /// Code: the line to open at (`None` for other indexes, or when no line is known).
+    pub focus: Option<f64>,
+}
+
+/// Hybrid searcher over one index connection. Vectors and file kinds are loaded once in `new`.
+pub struct Searcher<'a> {
+    conn: &'a Connection,
+    /// This is the code index's searcher (`IndexStore::CODE_FILE`): names are looked up as names (`code_lookup`).
+    is_code: bool,
+    /// One row per vector: `vectors.ids` holds the segment id.
+    vectors: VectorIndex,
+    row_slot: Vec<u32>,
+    row_modality: Vec<u8>,
+    row_sets_scale: Vec<bool>,
+    /// File id of each slot (a slot is a file that has vectors) and its kind.
+    slot_file: Vec<i64>,
+    slot_kind: Vec<Option<FileKind>>,
+    slot_of: HashMap<i64, u32>,
+    file_kind: HashMap<i64, FileKind>,
+    /// Runs the keyword stage with the original SQL (`keyword_stage_legacy`). For the equivalence test and for
+    /// checking the fast path; off in normal use.
+    legacy_keyword: bool,
+}
+
+/// A keyword match: the file's first FTS row in bm25 order.
+struct WordMatch {
+    file: i64,
+    segment: i64,
+    snippet: Option<String>,
+}
+
+impl<'a> Searcher<'a> {
+    /// Loads every vector of the index and every file's kind (`segments.vec IS NOT NULL`, with the scale flags).
+    pub fn new(conn: &'a Connection) -> Result<Self> {
+        Self::with_code(conn, false)
+    }
+
+    /// The searcher of the code index (`code.sqlite`).
+    pub fn new_code(conn: &'a Connection) -> Result<Self> {
+        Self::with_code(conn, true)
+    }
+
+    /// Keyword stage with the original SQL instead of the fast path. Results must be identical; used by the
+    /// equivalence test.
+    #[doc(hidden)]
+    pub fn with_legacy_keyword(mut self, on: bool) -> Self {
+        self.legacy_keyword = on;
+        self
+    }
+
+    /// Whether this searcher is the code index's.
+    pub fn is_code(&self) -> bool {
+        self.is_code
+    }
+
+    /// `new` for the main index (`is_code` false) or the code index (true).
+    pub fn with_code(conn: &'a Connection, is_code: bool) -> Result<Self> {
+        let mut file_kind = HashMap::new();
+        {
+            let mut st = conn.prepare("SELECT id, kind FROM files")?;
+            let mut rows = st.query([])?;
+            while let Some(r) = rows.next()? {
+                let id: i64 = r.get(0)?;
+                let kind: String = r.get(1)?;
+                if let Some(k) = FileKind::parse(&kind) {
+                    file_kind.insert(id, k);
+                }
+            }
+        }
+
+        let mut vectors = VectorIndex::default();
+        let mut row_slot = Vec::new();
+        let mut row_modality = Vec::new();
+        let mut row_sets_scale = Vec::new();
+        let mut slot_file: Vec<i64> = Vec::new();
+        let mut slot_of: HashMap<i64, u32> = HashMap::new();
+        {
+            let mut st = conn.prepare(
+                "SELECT s.id, s.file, s.modality, s.vec, s.kind, s.loc, f.kind, \
+                 CAST(json_extract(f.info, '$.pages') AS INTEGER) \
+                 FROM segments s JOIN files f ON f.id = s.file WHERE s.vec IS NOT NULL ORDER BY s.id",
+            )?;
+            let mut rows = st.query([])?;
+            while let Some(r) = rows.next()? {
+                let blob: Vec<u8> = r.get(3)?;
+                let Some(v) = digup_store::decode_f16(&blob) else { continue };
+                let id: i64 = r.get(0)?;
+                let file: i64 = r.get(1)?;
+                let modality: String = r.get(2)?;
+                let kind: String = r.get(4)?;
+                let loc: Option<f64> = r.get(5)?;
+                let file_kind_text: String = r.get(6)?;
+                let pages: Option<i64> = r.get(7)?;
+                let place = loc.map_or(0, |l| l as i64);
+                let later = if file_kind_text == "pdf" {
+                    kind != "chunk" && pages.unwrap_or(0) > BIG_PDF_PAGES && place > PDF_STEP
+                } else {
+                    kind == "chunk" && place > DOC_STEP
+                };
+                let slot = *slot_of.entry(file).or_insert_with(|| {
+                    slot_file.push(file);
+                    (slot_file.len() - 1) as u32
+                });
+                vectors.ids.push(id);
+                vectors.data.extend(v);
+                row_slot.push(slot);
+                row_modality.push(modality_index(Modality::parse(&modality).unwrap_or(Modality::None)));
+                row_sets_scale.push(!later);
+            }
+        }
+        let slot_kind = slot_file.iter().map(|f| file_kind.get(f).copied()).collect();
+        Ok(Self {
+            conn,
+            is_code,
+            vectors,
+            row_slot,
+            row_modality,
+            row_sets_scale,
+            slot_file,
+            slot_kind,
+            slot_of,
+            file_kind,
+            legacy_keyword: false,
+        })
+    }
+
+    /// Number of stored vectors.
+    pub fn vector_count(&self) -> usize {
+        self.vectors.len()
+    }
+
+    /// The indexed text of a segment (`coalesce(original, body)`), as it's written.
+    pub fn segment_text(&self, segment_id: i64) -> Result<Option<String>> {
+        let text = self
+            .conn
+            .query_row("SELECT coalesce(original, body) FROM fts WHERE rowid = ?1", [segment_id], |r| r.get(0))
+            .optional()?;
+        Ok(text)
+    }
+
+    /// Searches with a query embedding (`query_vec`, L2-normalized, `DIM` values; empty or of another length means no
+    /// meaning search, words only) and the query text (its words).
+    pub fn search(&self, query_vec: &[f32], query_text: &str, opts: &SearchOptions) -> Result<Vec<SearchHit>> {
+        let trace = trace_on();
+        let t = Instant::now();
+        let slots = self.slot_kind.len();
+        let allowed_slot: Vec<bool> = self
+            .slot_kind
+            .iter()
+            .map(|k| match &opts.kinds {
+                None => true,
+                Some(set) => k.is_some_and(|k| set.contains(&k)),
+            })
+            .collect();
+
+        // Meaning: score every vector, put the scores on the query's scale, keep each file's best segment.
+        let mut best_z = vec![f64::NEG_INFINITY; slots];
+        let mut best_cos = vec![0f32; slots];
+        let mut best_row = vec![usize::MAX; slots];
+        if query_vec.len() == DIM && !self.vectors.is_empty() {
+            let scores = self.vectors.scores(query_vec, ScanMode::Simd);
+            let z = self.meaning(&scores);
+            for row in 0..scores.len() {
+                let slot = self.row_slot[row] as usize;
+                if allowed_slot[slot] && z[row] > best_z[slot] {
+                    best_z[slot] = z[row];
+                    best_cos[slot] = scores[row];
+                    best_row[slot] = row;
+                }
+            }
+        }
+        trace_stage(trace, "meaning (scan + scale + best per file)", t);
+
+        // Words: FTS5 over names, OCR, page and document text. One pattern per word, OR-ed.
+        let terms = terms(query_text);
+        let term_refs: Vec<&str> = terms.iter().map(String::as_str).collect();
+        let identifier = if self.is_code { code_lookup::identifier(query_text) } else { None };
+        let patterns = match &identifier {
+            Some(words) => vec![code_lookup::phrase(words)],
+            None => patterns(&terms, opts.prefix_last),
+        };
+        let word_weight = opts.word_weight.unwrap_or(if self.is_code { CODE_WORD_WEIGHT } else { DEFAULT_WORD_WEIGHT });
+        let (words, coverage) = if patterns.is_empty() {
+            (Vec::new(), HashMap::new())
+        } else {
+            self.keyword_stage(&patterns, &term_refs, opts, trace)?
+        };
+        let word_index: HashMap<i64, usize> = words.iter().enumerate().map(|(i, w)| (w.file, i)).collect();
+
+        // A file qualifies by standing out in meaning, or by containing at least half of the query's words.
+        let lookup = is_lookup(&terms) || identifier.is_some();
+        let (meaning_weight, words_weight) = if lookup { (0.5, word_weight * 2.0) } else { (1.0, word_weight) };
+        let hinted = kind_hints(query_text);
+        let mut candidates: HashSet<i64> = HashSet::new();
+        for (slot, &file) in self.slot_file.iter().enumerate() {
+            if best_row[slot] != usize::MAX && best_z[slot] >= opts.z_gate {
+                candidates.insert(file);
+            }
+        }
+        for (&file, &share) in &coverage {
+            if share >= 0.5 {
+                candidates.insert(file);
+            }
+        }
+        let mut scored: Vec<(i64, f64)> = candidates
+            .into_iter()
+            .map(|file| {
+                let z = self
+                    .slot_of
+                    .get(&file)
+                    .filter(|&&s| best_row[s as usize] != usize::MAX)
+                    .map_or(0.0, |&s| best_z[s as usize]);
+                let share = coverage.get(&file).copied().unwrap_or(0.0);
+                let mut score = meaning_weight * z.max(0.0) + words_weight * share.powf(1.5);
+                if self.file_kind.get(&file).is_some_and(|k| hinted.contains(k)) {
+                    score += 1.0;
+                }
+                (file, score)
+            })
+            .collect();
+        scored.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+        trace_stage(trace, "candidates + score + sort", t);
+        let t = Instant::now();
+
+        let mut hits = Vec::new();
+        for (file, score) in scored.into_iter().take(opts.limit) {
+            let semantic = self
+                .slot_of
+                .get(&file)
+                .map(|&s| s as usize)
+                .filter(|&s| best_row[s] != usize::MAX)
+                .map(|s| (best_z[s], best_cos[s] as f64, best_row[s]));
+            let keyword = word_index.get(&file).map(|&i| (i + 1, &words[i]));
+            // The best meaning segment if it stands out; else the segment the words matched.
+            let use_meaning = semantic.is_some_and(|(z, _, _)| z >= opts.z_gate || keyword.is_none());
+            let rank = hits.len();
+            let segment_id = if use_meaning {
+                match semantic {
+                    Some((_, _, row)) => self.vectors.ids[row],
+                    None => continue,
+                }
+            } else {
+                match keyword {
+                    Some((_, w)) => w.segment,
+                    None => continue,
+                }
+            };
+
+            // Code: where a name is defined is looked for in the first 10 results only (a name used all over a big
+            // repo is in hundreds of stretches of every file that has it).
+            let mut focus = None;
+            let mut segment_id = segment_id;
+            if self.is_code {
+                let words_here = keyword.is_some_and(|(_, w)| w.segment == segment_id) || identifier.is_some();
+                (segment_id, focus) = self.code_place(
+                    file,
+                    segment_id,
+                    if rank < 10 { identifier.as_deref() } else { None },
+                    query_text,
+                    &terms,
+                    words_here,
+                )?;
+            }
+
+            let file_row = self
+                .conn
+                .prepare_cached("SELECT path, kind, mtime, size, info FROM files WHERE id = ?1")?
+                .query_row([file], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, f64>(2)?,
+                        r.get::<_, i64>(3)?,
+                        r.get::<_, Option<String>>(4)?,
+                    ))
+                })
+                .optional()?;
+            let (path, kind, modified, size, info) = match file_row {
+                Some((p, k, m, s, i)) => (p, FileKind::parse(&k).unwrap_or(FileKind::Doc), m, s, parse_info(i.as_deref())),
+                None => (String::new(), FileKind::Doc, 0.0, 0, HashMap::new()),
+            };
+
+            let segment_row = self
+                .conn
+                .prepare_cached("SELECT kind, loc, loc_end, excerpt FROM segments WHERE id = ?1")?
+                .query_row([segment_id], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, Option<f64>>(1)?,
+                        r.get::<_, Option<f64>>(2)?,
+                        r.get::<_, Option<String>>(3)?,
+                    ))
+                })
+                .optional()?;
+            let (segment, loc, loc_end, stored_excerpt) = match segment_row {
+                Some((k, l, le, e)) => (SegmentKind::parse(&k).unwrap_or(SegmentKind::Name), l, le, e),
+                None => (SegmentKind::Name, None, None, None),
+            };
+
+            // The matched words are quoted only when they come from the segment we point at. A segment with no place
+            // and no text (a screenshot's image vector) can borrow them from its file's OCR text.
+            let mut snippet = keyword
+                .filter(|(_, w)| w.segment == segment_id)
+                .and_then(|(_, w)| w.snippet.as_deref())
+                .filter(|s| s.contains('«'))
+                .map(|s| excerpt(s, 400));
+            if let Some((_, w)) = keyword {
+                if snippet.is_none() && stored_excerpt.is_none() && loc.is_none() {
+                    if let Some(s) = w.snippet.as_deref().filter(|s| s.contains('«')) {
+                        let matched_kind: Option<String> = self
+                            .conn
+                            .query_row("SELECT kind FROM segments WHERE id = ?1", [w.segment], |r| r.get(0))
+                            .optional()?;
+                        if matched_kind.as_deref() != Some(SegmentKind::Name.as_str()) {
+                            snippet = Some(excerpt(s, 400));
+                        }
+                    }
+                }
+            }
+
+            hits.push(SearchHit {
+                file_id: file,
+                path,
+                kind,
+                score,
+                z: semantic.map(|(z, _, _)| z),
+                cosine: semantic.map(|(_, c, _)| c),
+                keyword_rank: keyword.map(|(rank, _)| rank),
+                segment,
+                segment_id,
+                loc,
+                loc_end,
+                excerpt: snippet.or(stored_excerpt),
+                modified,
+                size,
+                info,
+                focus,
+            });
+        }
+        trace_stage(trace, "hits (per-hit file, segment, code place)", t);
+        Ok(hits)
+    }
+
+    /// Code: the stretch to point at, and the line in it to open at. A name looked up points at the stretch that
+    /// defines it, when one does (not the ones that call it). Otherwise the line is the first with the query's words,
+    /// when they matched in this stretch; a match by meaning alone opens at the stretch's first line.
+    fn code_place(
+        &self,
+        file: i64,
+        segment: i64,
+        identifier: Option<&[String]>,
+        query: &str,
+        terms: &[String],
+        words_here: bool,
+    ) -> Result<(i64, Option<f64>)> {
+        let name = query.trim().replace("()", "");
+        if let Some(identifier) = identifier {
+            let mut best: Option<(i64, i64, i32)> = None;
+            let mut st = self.conn.prepare(
+                "SELECT s.id, s.loc, coalesce(fts.original, fts.body) FROM fts JOIN segments s ON s.id = fts.rowid \
+                 WHERE fts MATCH ?1 AND s.file = ?2 ORDER BY s.loc LIMIT 300",
+            )?;
+            let mut rows = st.query(rusqlite::params![code_lookup::phrase(identifier), file])?;
+            while let Some(r) = rows.next()? {
+                if best.is_some_and(|b| b.2 >= 2) {
+                    break;
+                }
+                let Some(text) = r.get::<_, Option<String>>(2)? else { continue };
+                let first = r.get::<_, Option<f64>>(1)?.unwrap_or(0.0) as i64;
+                if let Some((line, strength)) = code_lookup::definition(&name, &text, first) {
+                    if strength > best.map_or(0, |b| b.2) {
+                        best = Some((r.get(0)?, line, strength));
+                    }
+                }
+            }
+            if let Some((segment, line, _)) = best {
+                return Ok((segment, Some(line as f64)));
+            }
+        }
+        if !(words_here || identifier.is_some()) {
+            return Ok((segment, None));
+        }
+        let Some(text) = self.segment_text(segment)? else { return Ok((segment, None)) };
+        let first = self
+            .conn
+            .query_row("SELECT loc FROM segments WHERE id = ?1", [segment], |r| r.get::<_, Option<f64>>(0))
+            .optional()?
+            .flatten()
+            .map_or(1, |l| l as i64);
+        let words = if identifier.is_none() { terms.to_vec() } else { vec![name.to_lowercase()] };
+        Ok((segment, code_lookup::first_line(&words, &text, first).map(|l| l as f64)))
+    }
+
+    /// The keyword stage: the words' FTS rows in bm25 order (rowid breaks ties), one per file, at most
+    /// `MAX_WORD_FILES` files, and each candidate file's share of the query's patterns (`coverage`).
+    ///
+    /// Fast path: bm25 is computed on `fts` alone and only the top `MAX_FTS_ROWS` rows are read, so the segments
+    /// table (whose rows carry vectors) is touched for kept rows only; coverage walks only the segments of the
+    /// kept files. Falls back to `keyword_stage_legacy` in the one case where the two can differ (an FTS row without
+    /// a segment inside the top rows, which the inner join of the legacy query drops before the limit).
+    fn keyword_stage(
+        &self,
+        patterns: &[String],
+        term_refs: &[&str],
+        opts: &SearchOptions,
+        trace: bool,
+    ) -> Result<(Vec<WordMatch>, HashMap<i64, f64>)> {
+        if self.legacy_keyword {
+            return self.keyword_stage_legacy(patterns, term_refs, opts);
+        }
+        let expr = patterns.join(" OR ");
+        let t = Instant::now();
+        let ids: Vec<i64> = {
+            let mut st = self.conn.prepare_cached(&format!(
+                "SELECT rowid FROM fts WHERE fts MATCH ?1 ORDER BY bm25(fts, 3.0, 1.0), rowid LIMIT {MAX_FTS_ROWS}"
+            ))?;
+            let v = st.query_map([&expr], |r| r.get(0))?.collect::<rusqlite::Result<Vec<i64>>>()?;
+            v
+        };
+        trace_stage(trace, "fts: top rows by bm25 (no join)", t);
+
+        let t = Instant::now();
+        let mut words: Vec<WordMatch> = Vec::new();
+        let mut seen = HashSet::new();
+        let mut orphans = false;
+        {
+            let mut st = self.conn.prepare_cached(
+                "SELECT s.file, snippet(fts, 1, '«', '»', '…', 12), fts.original FROM fts \
+                 JOIN segments s ON s.id = fts.rowid WHERE fts MATCH ?1 AND fts.rowid = ?2",
+            )?;
+            for &id in &ids {
+                if words.len() >= MAX_WORD_FILES {
+                    break;
+                }
+                let mut rows = st.query(rusqlite::params![expr, id])?;
+                let Some(r) = rows.next()? else {
+                    orphans = true;
+                    continue;
+                };
+                let file: i64 = r.get(0)?;
+                if !self.allowed_file(file, opts) || !seen.insert(file) {
+                    continue;
+                }
+                let fts_snippet: Option<String> = r.get(1)?;
+                let original: Option<String> = r.get(2)?;
+                // Text that normalizing changed is quoted as it's written.
+                let snippet = original.and_then(|o| text::snippet(&o, term_refs, 12)).or(fts_snippet);
+                words.push(WordMatch { file, segment: id, snippet });
+            }
+        }
+        trace_stage(trace, "fts: rows joined to segments + snippets", t);
+        if orphans && ids.len() == MAX_FTS_ROWS && words.len() < MAX_WORD_FILES {
+            return self.keyword_stage_legacy(patterns, term_refs, opts);
+        }
+
+        let t = Instant::now();
+        let mut coverage: HashMap<i64, f64> = HashMap::new();
+        if !words.is_empty() {
+            let files = words.iter().map(|w| w.file.to_string()).collect::<Vec<_>>().join(",");
+            // Segments of the kept files (a covering index scan), each checked against the pattern by rowid.
+            let sql = format!(
+                "SELECT DISTINCT s.file FROM segments s CROSS JOIN fts ON fts.rowid = s.id \
+                 WHERE s.file IN ({files}) AND fts MATCH ?1"
+            );
+            let mut st = self.conn.prepare_cached(&sql)?;
+            for pattern in patterns {
+                let mut rows = st.query([pattern])?;
+                while let Some(r) = rows.next()? {
+                    let file: i64 = r.get(0)?;
+                    *coverage.entry(file).or_insert(0.0) += 1.0 / patterns.len() as f64;
+                }
+            }
+        }
+        trace_stage(trace, "fts: coverage of kept files", t);
+        Ok((words, coverage))
+    }
+
+    /// The original keyword stage (one query over every match, joined to segments; coverage by `IN` over every
+    /// match). Kept as the reference for `keyword_stage`.
+    fn keyword_stage_legacy(
+        &self,
+        patterns: &[String],
+        term_refs: &[&str],
+        opts: &SearchOptions,
+    ) -> Result<(Vec<WordMatch>, HashMap<i64, f64>)> {
+        let mut words: Vec<WordMatch> = Vec::new();
+        let mut coverage: HashMap<i64, f64> = HashMap::new();
+        let mut seen = HashSet::new();
+        let mut st = self.conn.prepare(&format!(
+            "SELECT s.file, s.id, snippet(fts, 1, '«', '»', '…', 12), fts.original FROM fts \
+             JOIN segments s ON s.id = fts.rowid WHERE fts MATCH ?1 \
+             ORDER BY bm25(fts, 3.0, 1.0), fts.rowid LIMIT {MAX_FTS_ROWS}"
+        ))?;
+        let mut rows = st.query([patterns.join(" OR ")])?;
+        while let Some(r) = rows.next()? {
+            let file: i64 = r.get(0)?;
+            if words.len() >= MAX_WORD_FILES || !self.allowed_file(file, opts) || !seen.insert(file) {
+                continue;
+            }
+            let segment: i64 = r.get(1)?;
+            let fts_snippet: Option<String> = r.get(2)?;
+            let original: Option<String> = r.get(3)?;
+            // Text that normalizing changed is quoted as it's written.
+            let snippet = original.and_then(|o| text::snippet(&o, term_refs, 12)).or(fts_snippet);
+            words.push(WordMatch { file, segment, snippet });
+        }
+        if !words.is_empty() {
+            let files = words.iter().map(|w| w.file.to_string()).collect::<Vec<_>>().join(",");
+            let sql = format!(
+                "SELECT DISTINCT s.file FROM fts JOIN segments s ON s.id = fts.rowid \
+                 WHERE fts MATCH ?1 AND s.file IN ({files})"
+            );
+            let mut st = self.conn.prepare(&sql)?;
+            for pattern in patterns {
+                let mut rows = st.query([pattern])?;
+                while let Some(r) = rows.next()? {
+                    let file: i64 = r.get(0)?;
+                    *coverage.entry(file).or_insert(0.0) += 1.0 / patterns.len() as f64;
+                }
+            }
+        }
+        Ok((words, coverage))
+    }
+
+    fn allowed_file(&self, file: i64, opts: &SearchOptions) -> bool {
+        match &opts.kinds {
+            None => true,
+            Some(set) => self.file_kind.get(&file).is_some_and(|k| set.contains(k)),
+        }
+    }
+
+    /// This query's meaning scores (`Searcher.meaning`): each vector's score minus the average of its modality, in
+    /// standard deviations of all of them together. The averages and the deviation come from the rows that set the
+    /// scale; the others are scored on it.
+    fn meaning(&self, scores: &[f32]) -> Vec<f64> {
+        let mut sum = [0f64; MODALITIES];
+        let mut count = [0usize; MODALITIES];
+        for (row, &s) in scores.iter().enumerate() {
+            if self.row_sets_scale[row] {
+                let m = self.row_modality[row] as usize;
+                sum[m] += s as f64;
+                count[m] += 1;
+            }
+        }
+        let total_count: usize = count.iter().sum();
+        let all = sum.iter().sum::<f64>() / total_count.max(1) as f64;
+        let mut means = [all; MODALITIES];
+        for m in 0..MODALITIES {
+            if count[m] >= MIN_MODALITY_ROWS {
+                means[m] = sum[m] / count[m] as f64;
+            }
+        }
+        let centered: Vec<f64> = scores
+            .iter()
+            .zip(&self.row_modality)
+            .map(|(&s, &m)| s as f64 - means[m as usize])
+            .collect();
+        let (mut n, mut total) = (0usize, 0f64);
+        for (row, &c) in centered.iter().enumerate() {
+            if self.row_sets_scale[row] {
+                n += 1;
+                total += c;
+            }
+        }
+        let mean = total / n.max(1) as f64;
+        let mut squares = 0f64;
+        for (row, &c) in centered.iter().enumerate() {
+            if self.row_sets_scale[row] {
+                squares += (c - mean) * (c - mean);
+            }
+        }
+        let deviation = (squares / n.max(1) as f64).sqrt().max(DEVIATION_FLOOR);
+        centered.iter().map(|c| (c - mean) / deviation).collect()
+    }
+}
+
+/// `DIGUP_SEARCH_TRACE=1` prints the time of each search stage to stderr.
+fn trace_on() -> bool {
+    std::env::var_os("DIGUP_SEARCH_TRACE").is_some()
+}
+
+fn trace_stage(on: bool, stage: &str, since: Instant) {
+    if on {
+        eprintln!("[digup-search] {stage}: {:.3} ms", since.elapsed().as_secs_f64() * 1e3);
+    }
+}
+
+fn modality_index(m: Modality) -> u8 {
+    match m {
+        Modality::None => 0,
+        Modality::Text => 1,
+        Modality::Image => 2,
+        Modality::Audio => 3,
+    }
+}
+
+/// `files.info` as the string map Swift reads; any value that isn't a string makes the whole map empty.
+fn parse_info(json: Option<&str>) -> HashMap<String, String> {
+    let Some(json) = json else { return HashMap::new() };
+    let Ok(map) = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(json) else {
+        return HashMap::new();
+    };
+    map.into_iter()
+        .map(|(k, v)| match v {
+            serde_json::Value::String(s) => Some((k, s)),
+            _ => None,
+        })
+        .collect::<Option<HashMap<_, _>>>()
+        .unwrap_or_default()
+}
+
+/// One line, at most `limit` characters (graphemes), for result lists.
+fn excerpt(text: &str, limit: usize) -> String {
+    let line = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if line.graphemes(true).count() > limit {
+        let mut out: String = line.graphemes(true).take(limit).collect();
+        out.push('…');
+        out
+    } else {
+        line
+    }
+}
+
+/// Length in extended grapheme clusters, as Swift's `String.count`.
+fn glen(s: &str) -> usize {
+    unicode_segmentation::UnicodeSegmentation::graphemes(s, true).count()
+}
+
+/// True when every word has a digit and a letter (or is 4 or more characters): a lookup of codes and IDs.
+pub fn is_lookup(terms: &[String]) -> bool {
+    !terms.is_empty()
+        && terms.iter().all(|t| t.chars().any(char::is_numeric) && (t.chars().any(char::is_alphabetic) || glen(t) >= 4))
+}
+
+/// How many of `hits` (best first) score at least `ratio` times the top hit: the strong ones.
+pub fn strong_count(hits: &[SearchHit], ratio: f64) -> usize {
+    match hits.first() {
+        Some(top) if top.score > 0.0 => hits.iter().take_while(|h| h.score >= top.score * ratio).count(),
+        _ => hits.len(),
+    }
+}
+
+const STOPWORDS: &[&str] = &[
+    "a", "an", "the", "of", "in", "on", "at", "to", "for", "with", "and", "or", "my", "me", "that", "this", "these",
+    "those", "from", "about", "where", "what", "which", "who", "when", "is", "was", "are", "were", "be", "it", "its",
+    "some", "any", "find", "show", "file", "files", "photo", "photos", "picture", "image", "images", "screenshot",
+    "screenshots", "video", "videos", "pdf", "document", "documents", "recording",
+    // Bengali and Arabic (normalized, as `terms` sees them)
+    "এবং", "ও", "এই", "সেই", "একটি", "আমার", "থেকে", "জন্য", "সাথে", "মধ্যে", "কোথায়", "কোন", "কী", "কি", "যে", "ছবি",
+    "স্ক্রিনশট", "ভিডিও", "ফাইল", "পিডিএফ", "في", "من", "على", "الى", "عن", "مع", "هذا", "هذه", "ذلك", "التي", "الذي",
+    "اين", "ما", "صورة", "صور", "لقطة", "شاشة", "فيديو", "ملف", "مستند",
+];
+
+const KIND_WORDS: &[(&str, FileKind)] = &[
+    ("screenshot", FileKind::Screenshot), ("screenshots", FileKind::Screenshot), ("photo", FileKind::Image),
+    ("photos", FileKind::Image), ("picture", FileKind::Image), ("pictures", FileKind::Image), ("image", FileKind::Image),
+    ("images", FileKind::Image), ("pdf", FileKind::Pdf), ("pdfs", FileKind::Pdf), ("paper", FileKind::Pdf),
+    ("papers", FileKind::Pdf), ("document", FileKind::Doc), ("documents", FileKind::Doc), ("note", FileKind::Doc),
+    ("notes", FileKind::Doc), ("video", FileKind::Video), ("videos", FileKind::Video), ("clip", FileKind::Video),
+    ("movie", FileKind::Video), ("audio", FileKind::Audio), ("song", FileKind::Audio), ("podcast", FileKind::Audio),
+    ("voice", FileKind::Audio), ("sound", FileKind::Audio),
+    ("স্ক্রিনশট", FileKind::Screenshot), ("ছবি", FileKind::Image), ("পিডিএফ", FileKind::Pdf), ("নোট", FileKind::Doc),
+    ("ভিডিও", FileKind::Video), ("অডিও", FileKind::Audio), ("গান", FileKind::Audio), ("রেকর্ডিং", FileKind::Audio),
+    ("لقطة", FileKind::Screenshot), ("صورة", FileKind::Image), ("صور", FileKind::Image), ("مستند", FileKind::Doc),
+    ("ملاحظات", FileKind::Doc), ("فيديو", FileKind::Video), ("مقطع", FileKind::Video), ("صوت", FileKind::Audio),
+    ("تسجيل", FileKind::Audio), ("اغنية", FileKind::Audio),
+];
+
+/// Words of the query: normalized as keyword search keeps its text, lowercased, split on what isn't a letter or digit.
+/// Stopwords and kind words are dropped, duplicates removed, words of one character dropped.
+pub fn terms(text: &str) -> Vec<String> {
+    let normalized = text::normalized(text).to_lowercase();
+    let mut seen: HashSet<&str> = HashSet::new();
+    normalized
+        .split(|c: char| !text::is_word_char(c))
+        .filter(|w| glen(w) >= 2 && !STOPWORDS.contains(w))
+        .filter(|w| seen.insert(w))
+        .map(str::to_string)
+        .collect()
+}
+
+/// FTS5 patterns: quoted, and as prefixes for the last word while it's being typed and for words of languages that
+/// attach endings.
+fn patterns(terms: &[String], prefix_last: bool) -> Vec<String> {
+    let n = terms.len();
+    terms
+        .iter()
+        .enumerate()
+        .map(|(i, term)| {
+            let prefix = (prefix_last && i + 1 == n) || text::inflects(term);
+            format!("\"{term}\"{}", if prefix { "*" } else { "" })
+        })
+        .collect()
+}
+
+/// The query's words as an FTS5 OR-query, or `None` when it has no words.
+pub fn fts_query(text: &str, prefix_last: bool) -> Option<String> {
+    let words = terms(text);
+    if words.is_empty() {
+        return None;
+    }
+    Some(patterns(&words, prefix_last).join(" OR "))
+}
+
+/// Kinds the query asks for ("in a video", "ভিডিওতে"): a soft boost, not a filter. Bengali and Arabic attach endings,
+/// so a kind word also counts at the start of a longer word.
+pub fn kind_hints(text: &str) -> Vec<FileKind> {
+    let normalized = text::normalized(text).to_lowercase();
+    let mut out: Vec<FileKind> = Vec::new();
+    for word in normalized.split(|c: char| !text::is_word_char(c)).filter(|w| !w.is_empty()) {
+        let exact = KIND_WORDS.iter().find(|(k, _)| *k == word);
+        let kind = exact
+            .or_else(|| {
+                KIND_WORDS
+                    .iter()
+                    .find(|(k, _)| text::inflects(k) && glen(k) >= 3 && word.starts_with(k))
+            })
+            .map(|(_, kind)| *kind);
+        if let Some(kind) = kind {
+            if !out.contains(&kind) {
+                out.push(kind);
+            }
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn terms_keep_bengali_conjuncts_whole() {
+        // virama (U+09CD) is a combining mark, not alphanumeric: must not split the word.
+        assert_eq!(terms("ক্ষমা"), vec!["ক্ষমা".to_string()]);
+    }
+
+    #[test]
+    fn lookup_counts_graphemes() {
+        // 3 graphemes (each base+mark) with digits: not >= 4 and no letter-check difference.
+        assert!(is_lookup(&["ab12".to_string()]));
+        assert!(is_lookup(&["1234".to_string()]));
+        assert!(!is_lookup(&["abcd".to_string()]));
+    }
+
+    /// Naive reference of `Searcher.meaning`/`modalityMeans`: per-modality maps, no dense arrays.
+    fn naive_meaning(scores: &[f32], modality: &[u8], sets: &[bool]) -> Vec<f64> {
+        let set_rows: Vec<usize> = (0..scores.len()).filter(|&i| sets[i]).collect();
+        let overall = set_rows.iter().map(|&i| scores[i] as f64).sum::<f64>() / set_rows.len().max(1) as f64;
+        let mean_of = |m: u8| {
+            let group: Vec<f64> = set_rows.iter().filter(|&&i| modality[i] == m).map(|&i| scores[i] as f64).collect();
+            if group.len() >= MIN_MODALITY_ROWS {
+                group.iter().sum::<f64>() / group.len() as f64
+            } else {
+                overall
+            }
+        };
+        let centered: Vec<f64> = (0..scores.len()).map(|i| scores[i] as f64 - mean_of(modality[i])).collect();
+        let mean = set_rows.iter().map(|&i| centered[i]).sum::<f64>() / set_rows.len().max(1) as f64;
+        let var = set_rows.iter().map(|&i| (centered[i] - mean).powi(2)).sum::<f64>() / set_rows.len().max(1) as f64;
+        let dev = var.sqrt().max(DEVIATION_FLOOR);
+        centered.iter().map(|c| (c - mean) / dev).collect()
+    }
+
+    fn bare(conn: &Connection, modality: Vec<u8>, sets: Vec<bool>) -> Searcher<'_> {
+        Searcher {
+            conn,
+            is_code: false,
+            vectors: VectorIndex::default(),
+            row_slot: vec![0; modality.len()],
+            row_modality: modality,
+            row_sets_scale: sets,
+            slot_file: Vec::new(),
+            slot_kind: Vec::new(),
+            slot_of: HashMap::new(),
+            file_kind: HashMap::new(),
+            legacy_keyword: false,
+        }
+    }
+
+    /// Small xorshift generator so the random test is deterministic without a dependency.
+    fn rng(seed: &mut u64) -> f32 {
+        *seed ^= *seed << 13;
+        *seed ^= *seed >> 7;
+        *seed ^= *seed << 17;
+        ((*seed >> 40) as f32) / ((1u64 << 24) as f32) * 2.0 - 1.0
+    }
+
+    #[test]
+    fn dense_meaning_matches_naive_reference() {
+        let conn = digup_store::open_in_memory().unwrap();
+        let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+        for &n in &[7usize, 60, 500, 2000] {
+            let modality: Vec<u8> = (0..n).map(|i| [1u8, 2, 3, 0][(i * 7 + i / 3) % 4]).collect();
+            let sets: Vec<bool> = (0..n).map(|i| i % 5 != 0).collect();
+            let scores: Vec<f32> = (0..n)
+                .map(|i| rng(&mut seed) * 0.3 + [0.1f32, 0.4, -0.2, 0.0][modality[i] as usize])
+                .collect();
+            let s = bare(&conn, modality.clone(), sets.clone());
+            let dense = s.meaning(&scores);
+            let naive = naive_meaning(&scores, &modality, &sets);
+            for (d, r) in dense.iter().zip(&naive) {
+                assert!((d - r).abs() < 1e-9, "n={n}: dense {d} vs naive {r}");
+            }
+        }
+    }
+
+    #[test]
+    fn kind_hints_follow_the_swift_rules() {
+        assert_eq!(kind_hints("photos of cats"), vec![FileKind::Image]);
+        assert_eq!(kind_hints("screenshot of the bill"), vec![FileKind::Screenshot]);
+        assert_eq!(kind_hints("ভিডিওতে কুমির"), vec![FileKind::Video]);
+        assert_eq!(kind_hints("صورة قطة"), vec![FileKind::Image]);
+        assert!(kind_hints("tax return 2023").is_empty());
+    }
+
+    #[test]
+    fn fts_query_quotes_terms_and_prefixes_inflecting_ones() {
+        assert_eq!(fts_query("photos of my cat", false).as_deref(), Some("\"cat\""));
+        assert_eq!(fts_query("cat cat dog a", false).as_deref(), Some("\"cat\" OR \"dog\""));
+        assert_eq!(fts_query("cat dog", true).as_deref(), Some("\"cat\" OR \"dog\"*"));
+        assert_eq!(fts_query("the photos", false), None);
+        assert_eq!(terms("a cat cat x"), vec!["cat".to_string()]);
+    }
+
+    #[test]
+    fn lookup_needs_digits_and_letters_or_length_four() {
+        assert!(is_lookup(&["ab12".to_string()]));
+        assert!(is_lookup(&["1234".to_string()]));
+        assert!(!is_lookup(&["12".to_string()]));
+        assert!(!is_lookup(&["cat".to_string()]));
+        assert!(!is_lookup(&[]));
+    }
+
+    #[test]
+    fn strong_count_uses_ratio_of_top() {
+        let hit = |score: f64| SearchHit {
+            file_id: 0,
+            path: String::new(),
+            kind: FileKind::Doc,
+            score,
+            z: None,
+            cosine: None,
+            keyword_rank: None,
+            segment: SegmentKind::Name,
+            segment_id: 0,
+            loc: None,
+            loc_end: None,
+            excerpt: None,
+            modified: 0.0,
+            size: 0,
+            info: HashMap::new(),
+            focus: None,
+        };
+        let hits = vec![hit(4.0), hit(3.0), hit(1.0)];
+        assert_eq!(strong_count(&hits, 0.7), 2);
+        assert_eq!(strong_count(&[], 0.7), 0);
+    }
+
+    fn insert_file(conn: &Connection, id: i64, path: &str, kind: &str) {
+        conn.execute(
+            "INSERT INTO files(id, path, kind, size, mtime, inode, device) VALUES (?1, ?2, ?3, 100, 1000.0, ?1, 1)",
+            rusqlite::params![id, path, kind],
+        )
+        .unwrap();
+    }
+
+    fn insert_segment(conn: &Connection, id: i64, file: i64, kind: &str, modality: &str, vec: &[f32], body: &str) {
+        conn.execute(
+            "INSERT INTO segments(id, file, kind, modality, loc, loc_end, excerpt, vec) VALUES (?1, ?2, ?3, ?4, NULL, NULL, NULL, ?5)",
+            rusqlite::params![id, file, kind, modality, digup_store::encode_f16(vec)],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO fts(rowid, name, body, original) VALUES (?1, '', ?2, ?2)",
+            rusqlite::params![id, body],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn fixture_search_keeps_bengali_words_whole_and_points_at_matches() {
+        let conn = digup_store::open_in_memory().unwrap();
+        let mut e0 = vec![0f32; DIM];
+        e0[0] = 1.0;
+        let mut e1 = vec![0f32; DIM];
+        e1[1] = 1.0;
+        insert_file(&conn, 1, "/docs/story.txt", "doc");
+        insert_file(&conn, 2, "/pics/shot.png", "image");
+        insert_segment(&conn, 1, 1, "chunk", "text", &e1, "কুমিরের গল্প এখানে");
+        insert_segment(&conn, 2, 2, "image", "image", &e0, "");
+
+        let searcher = Searcher::new(&conn).unwrap();
+        assert_eq!(searcher.vector_count(), 2);
+
+        // Words only: an empty embedding.
+        let hits = searcher.search(&[], "কুমিরের", &SearchOptions::default()).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].file_id, 1);
+        assert_eq!(hits[0].keyword_rank, Some(1));
+        assert!(hits[0].excerpt.as_deref().unwrap_or("").contains("«কুমিরের»"));
+
+        // Kind filter removes the document.
+        let only_images = SearchOptions {
+            kinds: Some([FileKind::Image].into_iter().collect()),
+            ..SearchOptions::default()
+        };
+        assert!(searcher.search(&[], "কুমিরের", &only_images).unwrap().is_empty());
+
+        // Meaning with a query vector. Two rows cannot stand 2 deviations apart (z is at most 1), so the gate is lowered.
+        let gate = SearchOptions { z_gate: 0.5, ..SearchOptions::default() };
+        let hits = searcher.search(&e0, "", &gate).unwrap();
+        assert!(!hits.is_empty());
+        assert_eq!(hits[0].file_id, 2);
+        assert!(hits[0].cosine.unwrap() > 0.99);
+    }
+}

@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DigUp</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <input id="q" type="search" placeholder="Search your files…" autofocus autocomplete="off" spellcheck="false">
+  <button id="gear" title="Folders" aria-label="Folders">&#9881;</button>
+</header>
+<nav id="kinds" class="chips" aria-label="Filter by kind">
+  <button data-kind="" aria-pressed="true">All</button>
+  <button data-kind="screenshot" aria-pressed="false">Screenshots</button>
+  <button data-kind="image" aria-pressed="false">Images</button>
+  <button data-kind="pdf" aria-pressed="false">PDFs</button>
+  <button data-kind="doc" aria-pressed="false">Docs</button>
+  <button data-kind="audio" aria-pressed="false">Audio</button>
+  <button data-kind="video" aria-pressed="false">Video</button>
+</nav>
+<section id="folders" hidden>
+  <h2>Indexed folders</h2>
+  <ul id="folderList"></ul>
+  <div id="indexCounts" class="dim"></div>
+  <button id="pauseBtn" hidden>Pause</button>
+  <button id="addFolder">Add folder…</button>
+</section>
+<main>
+  <section id="welcome" hidden>
+    <h1>Welcome to DigUp</h1>
+    <p>Search your files by meaning. Choose folders to index; everything stays on this Mac.</p>
+    <p id="welcomeStep" class="dim">Step 1: download the model (860 MB), step 2: choose folders</p>
+    <p><button id="welcomeDl">Download model (860 MB)</button></p>
+    <div id="welcomeChoices"></div>
+    <p><button id="welcomeAdd">Add another folder…</button></p>
+  </section>
+  <ul id="results"></ul><p id="empty" class="dim"></p>
+</main>
+<footer>
+  <span id="statusText">…</span>
+  <span id="dl" hidden><button id="dlBtn">Download model (860 MB)</button><progress id="dlBar" value="0" max="1" hidden></progress></span>
+</footer>
+<script src="app.js"></script>
+</body>
+</html>

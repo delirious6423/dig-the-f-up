@@ -68,3 +68,6 @@ cargo run --release -p digup-crawl --example crawl_bench -- <dir> [threads]
 `DIGUP_LLAMA_BUILD` / `DIGUP_LLAMA_SRC` override where `digup-llama-sys` looks for the build and headers.
 `DIGUP_MODELS` overrides where the parity test looks for the GGUF files.
 Use `RUSTFLAGS="-C target-cpu=native"` only for local benchmarks, never for shipped binaries (see HANDOFF section 9).
+
+## Subagents (learned the hard way)
+Coding agents must be `subagent_type: "builder"` (haiku, small tool set, starts ~9K tokens). General-purpose agents start at ~46K tokens of tool schemas and die with "Autocompact is thrashing" on haiku; keep them for research. Briefs must give exact line ranges (`grep -n '^## ' docs/*.md`); never have an agent read whole specs or HANDOFF.md.

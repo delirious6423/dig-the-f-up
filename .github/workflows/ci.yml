@@ -1,0 +1,45 @@
+name: ci
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    # Windows is unverified (build-llama.sh needs bash and a CPU/MSVC build): do not let it block until it is proven.
+    continue-on-error: ${{ matrix.os == 'windows-latest' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install build tools (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y cmake clang libclang-dev ffmpeg
+      - name: Install build tools (macOS)
+        if: runner.os == 'macOS'
+        run: brew install cmake ffmpeg
+      - name: Install build tools (Windows)
+        if: runner.os == 'Windows'
+        run: choco install -y cmake ffmpeg llvm
+      - name: Cache llama.cpp build
+        uses: actions/cache@v4
+        with:
+          path: |
+            build-llama
+            vendor
+          key: llama-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/build-llama.sh', 'patches/**') }}
+      - name: Build llama.cpp (b11461 + patch)
+        shell: bash
+        run: scripts/build-llama.sh
+      - name: Tests (model-dependent tests skip when the GGUF files are absent)
+        run: cargo test --workspace --release
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --release

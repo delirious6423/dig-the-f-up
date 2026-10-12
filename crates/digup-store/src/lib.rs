@@ -8,6 +8,9 @@ use rusqlite::Connection;
 use std::path::Path;
 use std::time::Duration;
 
+pub mod index;
+pub mod migrate;
+
 const DDL: &str = r#"
 BEGIN IMMEDIATE;
 CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -71,7 +74,8 @@ fn init(c: &Connection) -> Result<()> {
         0 => c.execute_batch(DDL)?,
         SCHEMA_VERSION => {}
         v if v > SCHEMA_VERSION => bail!("index schema {v} is newer than this build ({SCHEMA_VERSION})"),
-        v => bail!("index schema {v} needs a migration this build does not have yet"),
+        1..SCHEMA_VERSION => migrate::migrate(c, v)?,
+        v => bail!("index schema {v} is not a valid version"),
     }
     Ok(())
 }
@@ -91,8 +95,10 @@ pub fn decode_f16(blob: &[u8]) -> Option<Vec<f16>> {
     if blob.len() != DIM * 2 {
         return None;
     }
-    Some(blob.chunks_exact(2).map(|b| f16::from_le_bytes([b[0], b[1]])).collect())
+    Some(blob.as_chunks::<2>().0.iter().map(|b| f16::from_le_bytes(*b)).collect())
 }
+
+pub mod scan;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ScanMode {
@@ -102,6 +108,9 @@ pub enum ScanMode {
     SerialLanes,
     /// Same inner loop split across all cores.
     ParallelLanes,
+    /// Runtime-dispatched SIMD kernel (AVX-512F / AVX2+FMA+F16C / NEON, else lanes), split across all cores
+    /// in blocks of `scan::BLOCK_ROWS` rows. What the searcher uses.
+    Simd,
 }
 
 /// All vectors in memory, row-major float16, with the segment id of each row.
@@ -144,25 +153,16 @@ impl VectorIndex {
     pub fn scores(&self, q: &[f32], mode: ScanMode) -> Vec<f32> {
         assert_eq!(q.len(), DIM);
         match mode {
-            ScanMode::SerialNaive => self.data.chunks_exact(DIM).map(|row| dot_naive(q, row)).collect(),
-            ScanMode::SerialLanes => self.data.chunks_exact(DIM).map(|row| dot_lanes(q, row)).collect(),
-            ScanMode::ParallelLanes => self.data.par_chunks_exact(DIM).map(|row| dot_lanes(q, row)).collect(),
+            ScanMode::SerialNaive => self.data.as_chunks::<DIM>().0.iter().map(|row| scan::dot_naive(q, row)).collect(),
+            ScanMode::SerialLanes => self.data.as_chunks::<DIM>().0.iter().map(|row| scan::dot_lanes(q, row)).collect(),
+            ScanMode::ParallelLanes => self.data.par_chunks_exact(DIM).map(|row| scan::dot_lanes(q, row)).collect(),
+            ScanMode::Simd => {
+                let mut out = vec![0f32; self.len()];
+                scan::dot_all_parallel(scan::best_kernel(), q, &self.data, &mut out);
+                out
+            }
         }
     }
-}
-
-fn dot_naive(q: &[f32], row: &[f16]) -> f32 {
-    q.iter().zip(row).map(|(a, b)| a * b.to_f32()).sum()
-}
-
-fn dot_lanes(q: &[f32], row: &[f16]) -> f32 {
-    let mut acc = [0f32; 8];
-    for (qc, rc) in q.chunks_exact(8).zip(row.chunks_exact(8)) {
-        for i in 0..8 {
-            acc[i] += qc[i] * rc[i].to_f32();
-        }
-    }
-    acc.iter().sum()
 }
 
 /// Indices and scores of the `k` highest scores, best first.
@@ -251,5 +251,34 @@ mod tests {
         assert_eq!(idx.ids[best[0].0], 123);
         assert!(best[0].1 > 0.99);
         assert!(best[0].1 >= best[1].1 && best[1].1 >= best[2].1);
+    }
+
+    #[test]
+    fn simd_scan_ranks_target_across_blocks() {
+        // Swift float16VectorsScoreAcrossBlocks: 2 * blockRows + 300 rows, target at rows - 5.
+        let rows = 2 * 1024 + 300;
+        let mut idx = VectorIndex::default();
+        for i in 0..rows {
+            idx.push(i as i64, &unit(i as u32));
+        }
+        let target = rows - 5;
+        let q = unit(target as u32);
+        let sc = idx.scores(&q, ScanMode::Simd);
+        assert_eq!(sc.len(), rows);
+        let best = top_k(&sc, 3);
+        assert_eq!(idx.ids[best[0].0], target as i64);
+        assert!((best[0].1 - 1.0).abs() < 0.002, "cosine {}", best[0].1);
+        let naive = idx.scores(&q, ScanMode::SerialNaive);
+        for i in 0..rows {
+            assert!((sc[i] - naive[i]).abs() < 1e-4, "row {i}");
+        }
+    }
+
+    #[test]
+    fn top_k_breaks_ties_by_lower_index() {
+        let scores = [1.0f32, 2.0, 2.0, 0.5, 2.0, 2.0];
+        assert_eq!(top_k(&scores, 3), vec![(1, 2.0), (2, 2.0), (4, 2.0)]);
+        assert_eq!(top_k(&[3.0f32; 5], 2), vec![(0, 3.0), (1, 3.0)]);
+        assert!(top_k(&scores, 0).is_empty());
     }
 }

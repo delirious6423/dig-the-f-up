@@ -1,0 +1,24 @@
+[package]
+name = "digup-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "digup"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+digup-core = { workspace = true }
+digup-crawl = { path = "../digup-crawl" }
+digup-embed = { path = "../digup-embed" }
+digup-extract-pdf = { path = "../digup-extract-pdf" }
+digup-extract-video = { path = "../digup-extract-video" }
+digup-models = { path = "../digup-models" }
+digup-index = { path = "../digup-index" }
+digup-search = { path = "../digup-search" }
+digup-store = { path = "../digup-store" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

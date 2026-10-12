@@ -1,0 +1,21 @@
+[package]
+name = "digup-search"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Hybrid search for DigUp: meaning (vector z-scores) fused with keyword (FTS5) matches"
+
+[dependencies]
+digup-core = { path = "../digup-core" }
+digup-store = { path = "../digup-store" }
+digup-text = { path = "../digup-text" }
+anyhow.workspace = true
+half.workspace = true
+rayon.workspace = true
+rusqlite.workspace = true
+unicode-normalization = "0.1"
+unicode-segmentation = "1"
+serde_json = "1"
+
+[dev-dependencies]

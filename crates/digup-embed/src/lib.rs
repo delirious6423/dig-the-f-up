@@ -18,6 +18,8 @@ const AUDIO_SECONDS: usize = 30;
 /// Valid image token budgets.
 pub const IMAGE_BUDGETS: [usize; 5] = [70, 140, 280, 560, 1120];
 
+// The bindgen enum type is u32 on macOS and i32 on Windows: keep the casts for portability.
+#[allow(clippy::unnecessary_cast)]
 extern "C" fn log_cb(level: sys::ggml_log_level, text: *const c_char, _ud: *mut c_void) {
     // Keep warnings and errors only; loading is chatty.
     // CONT lines continue the previous message, so they inherit its level.
