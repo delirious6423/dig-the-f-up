@@ -8,7 +8,7 @@ license.workspace = true
 default = ["llama"]
 # Implements `Embed` for the real llama.cpp embedder. Off for fast tests with a fake embedder.
 llama = ["dep:dtfu-embed"]
-# OCR through LightOnOCR-3 (selected at run time with DTFU_OCR=lighton; models: see dtfu-models).
+# Kept for old build commands: LightOnOCR-3 is now on by default (dtfu-ocr default feature).
 lighton = ["dtfu-ocr/lighton"]
 
 [dependencies]

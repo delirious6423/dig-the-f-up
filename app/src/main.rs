@@ -168,28 +168,42 @@ fn model_ok() -> bool {
     dtfu_models::locate(&dtfu_models::TEXT).is_some() && dtfu_models::locate(&dtfu_models::MMPROJ).is_some()
 }
 
-/// Off macOS, OCR (text in screenshots) runs on the `ocrs` engine, whose two small model files (12 MB) are fetched
-/// here; the engine picks them up within 30 s. A failure only costs OCR, so it is logged and not shown. On macOS
-/// Apple Vision needs no files and this does nothing.
+/// Fetches the OCR (text in screenshots) models in the background: LightOnOCR (about 1 GB) on every platform (the
+/// engine off macOS, Vision's fallback on macOS) and, off macOS first, the two small `ocrs` files (12 MB) that read
+/// Latin text until LightOn is there. Engines pick the files up on their next call. A failure only costs OCR, so it is
+/// logged and not shown. The "cancel download" button does not stop it.
 fn fetch_ocr_models() {
-    if cfg!(target_os = "macos") || dtfu_models::ocrs_present() {
+    let want_ocrs = !cfg!(target_os = "macos") && !dtfu_models::ocrs_present();
+    if !want_ocrs && dtfu_models::lighton_present() {
         return;
     }
     static RUNNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     if RUNNING.swap(true, std::sync::atomic::Ordering::SeqCst) {
         return;
     }
-    std::thread::spawn(|| {
-        // Its own flag: the "cancel download" button stops the large model download, not this 12 MB one.
+    std::thread::spawn(move || {
+        struct Done;
+        impl Drop for Done {
+            fn drop(&mut self) {
+                RUNNING.store(false, std::sync::atomic::Ordering::SeqCst); // also after a panic
+            }
+        }
+        let _done = Done;
+        // Its own flag: the "cancel download" button stops the embedding model download, not this one.
         let never = std::sync::atomic::AtomicBool::new(false);
-        match dtfu_models::download_ocrs(&never, &mut |_, _, _| {}) {
-            Ok(_) => logging::info("OCR models downloaded"),
+        let report = |what: &str, result: anyhow::Result<Vec<std::path::PathBuf>>| match result {
+            Ok(_) => logging::info(&format!("{what} downloaded")),
             Err(e) if dtfu_models::is_cancelled(&e) => {}
             // `dtfu download` is fetching them right now; it finishes the job.
-            Err(e) if format!("{e:#}").contains("in progress") => logging::info(&format!("OCR models: {e:#}")),
-            Err(e) => logging::error(&format!("OCR model download failed: {e:#}")),
+            Err(e) if format!("{e:#}").contains("in progress") => logging::info(&format!("{what}: {e:#}")),
+            Err(e) => logging::error(&format!("{what} download failed: {e:#}")),
+        };
+        // Off macOS the small `ocrs` models (12 MB) first, so screenshots get OCR while LightOn (1 GB) downloads.
+        if want_ocrs {
+            report("OCR models (ocrs)", dtfu_models::download_ocrs(&never, &mut |_, _, _| {}));
         }
-        RUNNING.store(false, std::sync::atomic::Ordering::SeqCst);
+        // LightOnOCR: the default engine off macOS, Vision's fallback for unsupported scripts on macOS.
+        report("OCR models (LightOnOCR)", dtfu_models::download_lighton(&never, &mut |_, _, _| {}));
     });
 }
 

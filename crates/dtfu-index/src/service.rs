@@ -31,6 +31,19 @@ pub struct NotReady;
 const OCR_BACKFILL_KEY: &str = "ocr_backfill";
 const OCR_MISSED: &str = "missed";
 const OCR_DONE: &str = "done";
+/// `meta` key: [`OCR_DONE`] once screenshots were queued again after LightOnOCR's models were installed.
+const OCR_LIGHTON_KEY: &str = "ocr_lighton";
+/// LightOnOCR reads what the engines before it misread (non-Latin scripts with `ocrs`; Hebrew, Greek and the Indic
+/// scripts with Vision, which returns low-confidence guesses that cannot be told apart afterwards): once it can run,
+/// OCR every finished screenshot again, once per index.
+fn lighton_backfill(store: &mut IndexStore, ocr: &dyn Ocr) -> Result<()> {
+    if ocr.best_ready() && store.meta(OCR_LIGHTON_KEY)?.as_deref() != Some(OCR_DONE) {
+        store.requeue_kind(FileKind::Screenshot)?;
+        store.set_meta(OCR_LIGHTON_KEY, Some(OCR_DONE))?;
+    }
+    Ok(())
+}
+
 impl std::fmt::Display for NotReady {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "the model is not ready")
@@ -221,6 +234,7 @@ impl Service {
                 }
             }
         }
+        lighton_backfill(store, ocr)?;
 
         loop {
             if control.take_sync() {
@@ -271,6 +285,8 @@ impl Service {
                 new_files = if c.any_request(false) { self.main.store.pending(None, Some(&new_files))?.into_iter().map(|f| f.id).collect() } else { Vec::new() };
                 continue;
             }
+            // LightOn's models may arrive (downloaded in the background) while the service runs.
+            lighton_backfill(&mut self.main.store, ocr)?;
             if self.main.store.pending_count()? > 0 && control.backfill_allowed() {
                 let c = &control;
                 run::run(&mut self.main.store, emb, ocr, &opts, None, None, &|| c.any_request(false) || !c.backfill_allowed(), &mut |e| {
@@ -358,6 +374,35 @@ mod tests {
     use crate::testing::FakeEmbedder;
     use crate::types::NoOcr;
     use std::sync::mpsc;
+
+    struct BestOcr(bool);
+    impl Ocr for BestOcr {
+        fn recognize(&self, _: usize, _: usize, _: &[u8]) -> Option<String> {
+            None
+        }
+        fn best_ready(&self) -> bool {
+            self.0
+        }
+    }
+
+    #[test]
+    fn lighton_backfill_requeues_screenshots_once_when_the_best_engine_is_ready() {
+        let mut store = IndexStore::open(&temp("lighton-backfill"), "index.sqlite").unwrap();
+        let file = |p: &str, kind| dtfu_store::index::NewFile { path: p.into(), kind, size: 10, mtime: 1.0, inode: 1, device: 1 };
+        let shot = store.insert_file(&file("/d/a.png", FileKind::Screenshot), &[]).unwrap();
+        let photo = store.insert_file(&file("/d/p.jpg", FileKind::Image), &[]).unwrap();
+        for id in [shot, photo] {
+            store.finish(id, dtfu_core::FileState::Done, None, &Default::default()).unwrap();
+        }
+        lighton_backfill(&mut store, &BestOcr(false)).unwrap();
+        assert_eq!(store.pending_count().unwrap(), 0, "not ready: nothing queued");
+        assert_eq!(store.meta(OCR_LIGHTON_KEY).unwrap(), None);
+        lighton_backfill(&mut store, &BestOcr(true)).unwrap();
+        assert_eq!(store.pending_count().unwrap(), 1, "the screenshot only");
+        store.finish(shot, dtfu_core::FileState::Done, None, &Default::default()).unwrap();
+        lighton_backfill(&mut store, &BestOcr(true)).unwrap();
+        assert_eq!(store.pending_count().unwrap(), 0, "once per index");
+    }
 
     fn temp(name: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("dtfu-svc-{name}-{}", std::process::id()));

@@ -172,7 +172,7 @@ pub fn lighton_search_paths(file: &ModelFile) -> Vec<PathBuf> {
     if let Some(dir) = env_dir(LIGHTON_ENV) {
         v.push(dir.join(file.name));
     }
-    v.push(models_dir().join("lightonocr").join(file.name));
+    v.push(lighton_dir().join(file.name));
     if let Some(hub) = hf_hub_dir() {
         v.push(
             hub.join(format!("models--{}", LIGHTON_REPOSITORY.replace('/', "--")))
@@ -187,6 +187,32 @@ pub fn lighton_search_paths(file: &ModelFile) -> Vec<PathBuf> {
 /// Finds a present copy of a LightOnOCR file (size must match) in [`lighton_search_paths`].
 pub fn locate_lighton(file: &ModelFile) -> Option<PathBuf> {
     lighton_search_paths(file).into_iter().find(|path| has_size(path, file.bytes))
+}
+
+/// Both LightOnOCR files, in download order.
+pub const LIGHTON_FILES: [ModelFile; 2] = [LIGHTON_TEXT, LIGHTON_MMPROJ];
+
+/// The folder [`download_lighton`] saves into: `<models_dir()>/lightonocr`, the standard place
+/// [`lighton_search_paths`] looks.
+pub fn lighton_dir() -> PathBuf {
+    models_dir().join("lightonocr")
+}
+
+/// True when both LightOnOCR files are found by [`locate_lighton`].
+pub fn lighton_present() -> bool {
+    LIGHTON_FILES.iter().all(|f| locate_lighton(f).is_some())
+}
+
+/// Downloads the LightOnOCR files that are missing into [`lighton_dir`] (about 1 GB; resumable, size- and
+/// SHA-256-checked). Files already found elsewhere by [`locate_lighton`] are skipped.
+pub fn download_lighton(cancel: &AtomicBool, progress: &mut dyn FnMut(&str, u64, u64)) -> Result<Vec<PathBuf>> {
+    let missing: Vec<ModelFile> = LIGHTON_FILES.into_iter().filter(|f| locate_lighton(f).is_none()).collect();
+    if missing.is_empty() {
+        return Ok(LIGHTON_FILES.iter().filter_map(locate_lighton).collect());
+    }
+    let dir = lighton_dir();
+    fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+    download_all(&missing, &dir, Some(&lighton_base_url()), cancel, progress)
 }
 
 /// Checks that `path` is a file of exactly `bytes` bytes. Symlinks are followed.

@@ -7,8 +7,8 @@
 //! greedy decoding.
 //!
 //! Guards: images are rejected above [`MAX_PIXELS`] and downscaled to a longest side of [`Options::max_side`]
-//! (2048 px on macOS per the model card; 1280 px elsewhere, env `DTFU_OCR_MAX_SIDE`; the smaller non-Metal
-//! default is an ESTIMATE to bound CPU encode time, not yet measured). Output is capped at
+//! (1280 px, env `DTFU_OCR_MAX_SIDE`; the model card allows 2048, but on a Retina screenshot 1280 read as well, 0
+//! errors, in 2.4 s instead of 6.2 s, and 1024 started to misread; docs/BENCHMARKS.md OCR). Output is capped at
 //! [`DEFAULT_MAX_TOKENS`] (env `DTFU_OCR_MAX_TOKENS`) and further clamped so prompt + output fit the context
 //! (long outputs are cut short, not failed).
 //!
@@ -32,10 +32,10 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-/// Longest image side fed to the model on Metal builds (model card).
+/// Largest longest side the model takes (model card).
 pub const MAX_SIDE: usize = 2048;
-/// Default longest side on non-macOS builds (CPU/other GPUs): ESTIMATE, not measured.
-pub const MAX_SIDE_CPU: usize = 1280;
+/// Default longest side fed to the model (measured, see the module docs).
+pub const DEFAULT_MAX_SIDE: usize = 1280;
 /// Inputs above this many pixels are refused outright (decompression-bomb style guard).
 pub const MAX_PIXELS: usize = 100_000_000;
 /// Default cap on generated tokens.
@@ -76,7 +76,7 @@ impl Default for Options {
             threads: None,
             max_side: env("DTFU_OCR_MAX_SIDE")
                 .map(|v| v.clamp(64, 4096) as usize)
-                .unwrap_or(if cfg!(target_os = "macos") { MAX_SIDE } else { MAX_SIDE_CPU }),
+                .unwrap_or(DEFAULT_MAX_SIDE),
             abort_hook: std::env::var_os("DTFU_OCR_NO_ABORT").is_none(),
             use_mmap: false,
         }
@@ -407,6 +407,14 @@ pub fn available() -> bool {
     model_paths().is_some()
 }
 
+/// Set once loading the model failed (the engine stays unavailable for the rest of the process).
+static LOAD_FAILED: AtomicBool = AtomicBool::new(false);
+
+/// True when the model files are installed and the model has not failed to load.
+pub fn usable() -> bool {
+    !LOAD_FAILED.load(Relaxed) && available()
+}
+
 /// Why [`try_recognize`] could not run the model; callers should use another engine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Unavailable;
@@ -452,6 +460,7 @@ pub fn try_recognize(width: usize, height: usize, rgb: &[u8]) -> Result<Option<S
                 Err(e) => {
                     eprintln!("dtfu-ocr: LightOnOCR failed to load ({e}); using the default OCR engine");
                     *guard = State::Failed;
+                    LOAD_FAILED.store(true, Relaxed);
                     return Err(Unavailable);
                 }
             },

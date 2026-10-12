@@ -1,7 +1,11 @@
-//! Screenshot OCR. Engines: Apple Vision (macOS default), `ocrs` (default elsewhere) and, with feature `lighton`,
-//! LightOnOCR-3-0.8B; pick one with `$DTFU_OCR` or [`recognize_rgb_with`]. On macOS: Apple Vision. Elsewhere: the pure-Rust `ocrs` engine
-//! (see `ocrs_backend`; models are not bundled, see that module's docs). On macOS the
-//! `ocrs` backend is available with `--features ocrs` through `recognize_rgb_ocrs`.
+//! Screenshot OCR. Engines: Apple Vision, LightOnOCR-3-0.8B (feature `lighton`, on by default) and the pure-Rust
+//! `ocrs`; pick one with `$DTFU_OCR` or [`recognize_rgb_with`].
+//!
+//! Defaults ([`recognize_rgb`]): on macOS Apple Vision, with LightOn as the fallback when Vision finds no text or
+//! reads it with low confidence (scripts Vision does not support, such as Hebrew, Greek and the Indic scripts, come
+//! back as low-confidence guesses). Elsewhere LightOn, with `ocrs` while LightOn's model files are not downloaded yet
+//! or fail to load. Model files are not bundled: see `dtfu-models`. On macOS the `ocrs` backend is available with
+//! `--features ocrs` through `recognize_rgb_ocrs`.
 
 #[cfg(any(not(target_os = "macos"), feature = "ocrs"))]
 mod ocrs_backend;
@@ -29,8 +33,19 @@ pub enum Engine {
 pub const ENGINE_ENV: &str = "DTFU_OCR";
 
 impl Engine {
-    /// Vision on macOS, `ocrs` elsewhere.
+    /// Vision on macOS; elsewhere LightOn when compiled in, else `ocrs`.
     pub fn platform_default() -> Engine {
+        if cfg!(target_os = "macos") {
+            Engine::Vision
+        } else if cfg!(feature = "lighton") {
+            Engine::Lighton
+        } else {
+            Engine::Ocrs
+        }
+    }
+
+    /// What runs when LightOn cannot (model files missing or unloadable): Vision on macOS, `ocrs` elsewhere.
+    pub fn fallback() -> Engine {
         if cfg!(target_os = "macos") {
             Engine::Vision
         } else {
@@ -50,12 +65,18 @@ impl Engine {
 
     /// The engine named by `$DTFU_OCR`, or the platform default when unset, empty or unknown.
     pub fn from_env() -> Engine {
+        Engine::explicit().unwrap_or_else(Engine::platform_default)
+    }
+
+    /// The engine named by `$DTFU_OCR`, or `None` when unset, empty or unknown (then the default policy applies,
+    /// with its fallbacks; a named engine runs alone except that LightOn without models uses [`Engine::fallback`]).
+    pub fn explicit() -> Option<Engine> {
         match std::env::var(ENGINE_ENV) {
-            Ok(v) if !v.trim().is_empty() => Engine::parse(&v).unwrap_or_else(|| {
-                eprintln!("dtfu-ocr: unknown {ENGINE_ENV}={v:?} (use vision, ocrs or lighton); using the default");
-                Engine::platform_default()
+            Ok(v) if !v.trim().is_empty() => Engine::parse(&v).or_else(|| {
+                warn_once(&format!("dtfu-ocr: unknown {ENGINE_ENV}={v:?} (use vision, ocrs or lighton); using the default"));
+                None
             }),
-            _ => Engine::platform_default(),
+            _ => None,
         }
     }
 
@@ -77,42 +98,74 @@ impl Engine {
     }
 }
 
-/// Whether [`recognize_rgb`] can read text now. False only when its engine is `ocrs` (the default off macOS) and its
-/// model files are not there yet; Vision needs no files and LightOn falls back to the platform default.
+/// Whether [`recognize_rgb`] can read text now. Off macOS that needs model files: LightOn's or `ocrs`'s (LightOn
+/// falls back to `ocrs`). Vision needs none.
 pub fn ready() -> bool {
     let engine = if Engine::from_env().is_compiled() { Engine::from_env() } else { Engine::platform_default() };
     match engine {
+        #[cfg(feature = "lighton")]
+        Engine::Lighton if llama_backend::usable() => true,
         #[cfg(any(not(target_os = "macos"), feature = "ocrs"))]
         Engine::Ocrs => ocrs_backend::ready(),
+        #[cfg(not(target_os = "macos"))]
+        Engine::Lighton => ocrs_backend::ready(),
         _ => true,
     }
 }
 
+/// Whether [`recognize_rgb`] reads with LightOn now: its model files are installed, it has not failed to load and
+/// `$DTFU_OCR` does not name another engine. Always false without feature `lighton`.
+pub fn lighton_available() -> bool {
+    #[cfg(feature = "lighton")]
+    return matches!(Engine::explicit(), None | Some(Engine::Lighton)) && llama_backend::usable();
+    #[cfg(not(feature = "lighton"))]
+    false
+}
+
+/// Below this mean Vision confidence the macOS default asks LightOn instead. Measured on the 35 corpus images
+/// (docs/BENCHMARKS.md, OCR): every image Vision misread averaged 0.5 or less (Hebrew, Greek, Hindi, Bengali, Tamil),
+/// while images it read correctly mostly scored 1.0; the few correct ones under 0.6 (mixed-script menus) LightOn
+/// reads as well.
+pub const VISION_MIN_CONFIDENCE: f32 = 0.6;
+
 /// Recognize text in a packed RGB8 image (`rgb.len() >= width*height*3`).
 /// Returns recognized lines joined by "\n", or `None` if nothing was found.
-/// Uses the engine named by `$DTFU_OCR` ([`Engine::from_env`]); by default Apple Vision on macOS and `ocrs`
-/// elsewhere. If the selected engine is not compiled in, or is LightOn without usable model files, a warning is
-/// logged once and the platform default is used for that call.
+/// Uses the engine named by `$DTFU_OCR` ([`Engine::from_env`]), by default [`Engine::platform_default`]. If the
+/// selected engine is not compiled in, a warning is logged once and the platform default is used. LightOn without
+/// usable model files falls back to [`Engine::fallback`]; Vision falls back to LightOn (when installed) on images
+/// where it finds no text or its mean confidence is under [`VISION_MIN_CONFIDENCE`].
 pub fn recognize_rgb(width: usize, height: usize, rgb: &[u8]) -> Option<String> {
-    let engine = Engine::from_env();
+    let mut engine = Engine::from_env();
     if !engine.is_compiled() {
         warn_once(&format!(
             "dtfu-ocr: {ENGINE_ENV}={} is not available in this build (feature missing); using {}",
             engine.name(),
             Engine::platform_default().name()
         ));
-        return recognize_rgb_with(Engine::platform_default(), width, height, rgb);
+        engine = Engine::platform_default();
+    }
+    if !valid_image(width, height, rgb) {
+        return None;
     }
     #[cfg(feature = "lighton")]
     if engine == Engine::Lighton {
-        if !valid_image(width, height, rgb) {
-            return None;
-        }
         return match llama_backend::try_recognize(width, height, rgb) {
             Ok(text) => text,
-            // Model files missing or unloadable (already logged): keep OCR working with the default engine.
-            Err(llama_backend::Unavailable) => recognize_rgb_with(Engine::platform_default(), width, height, rgb),
+            // Model files missing or unloadable (already logged): keep OCR working with the fallback engine.
+            Err(llama_backend::Unavailable) => recognize_rgb_with(Engine::fallback(), width, height, rgb),
         };
+    }
+    // The default policy on macOS (not an explicit `DTFU_OCR=vision`): Vision, then LightOn where Vision is unsure.
+    #[cfg(target_os = "macos")]
+    if engine == Engine::Vision && Engine::explicit().is_none() {
+        let scored = mac::recognize_scored(width, height, rgb);
+        #[cfg(feature = "lighton")]
+        if scored.as_ref().is_none_or(|(_, c)| *c < VISION_MIN_CONFIDENCE) && llama_backend::usable() {
+            if let Ok(Some(better)) = llama_backend::try_recognize(width, height, rgb) {
+                return Some(better);
+            }
+        }
+        return scored.map(|(text, _)| text);
     }
     recognize_rgb_with(engine, width, height, rgb)
 }
@@ -132,7 +185,7 @@ pub fn recognize_rgb_with(engine: Engine, width: usize, height: usize, rgb: &[u8
     }
     match engine {
         #[cfg(target_os = "macos")]
-        Engine::Vision => mac::recognize(width, height, rgb),
+        Engine::Vision => mac::recognize_scored(width, height, rgb).map(|(text, _)| text),
         #[cfg(any(not(target_os = "macos"), feature = "ocrs"))]
         Engine::Ocrs => ocrs_backend::recognize(width, height, rgb),
         #[cfg(feature = "lighton")]
@@ -189,7 +242,9 @@ mod mac {
     };
     use std::ffi::c_void;
 
-    pub fn recognize(width: usize, height: usize, rgb: &[u8]) -> Option<String> {
+    /// The recognized lines joined by "\n" and the mean confidence of the lines (0..=1), or `None` when Vision found
+    /// no text or failed.
+    pub fn recognize_scored(width: usize, height: usize, rgb: &[u8]) -> Option<(String, f32)> {
         // Expand to RGBA (alpha skipped) so the layout is a universally supported one.
         let n = width * height;
         let mut rgba = Vec::with_capacity(n * 4);
@@ -232,18 +287,20 @@ mod mac {
             handler.performRequests_error(&arr).ok()?;
             let results = request.results()?;
             let mut lines: Vec<String> = Vec::new();
+            let mut confidence = 0f32;
             for obs in results.iter() {
                 let obs: &VNRecognizedTextObservation = obs.downcast_ref()?;
                 let cands = obs.topCandidates(1);
                 if let Some(c) = cands.firstObject() {
                     lines.push(c.string().to_string());
+                    confidence += c.confidence();
                 }
             }
             let text = lines.join("\n");
             if text.trim().is_empty() {
                 None
             } else {
-                Some(text)
+                Some((text, confidence / lines.len() as f32))
             }
         })
     }

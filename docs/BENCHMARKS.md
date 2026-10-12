@@ -59,8 +59,8 @@ Embedding throughput, Metal against CPU only (`cargo run --release -p dtfu-embed
 | engine | median per image | character error rate | peak memory |
 |---|---|---|---|
 | Apple Vision (default on macOS) | 0.07 s | 0.050 | 262 MB |
-| LightOnOCR-3 0.8B (optional, feature `lighton`) | 1.48 s | 0.008 | 1.81 GB |
-| ocrs 0.13 (default on Windows and Linux) | 0.13 s* | 0.183 (Latin-script images: 0.078) | not measured |
+| LightOnOCR-3 0.8B (default on Windows and Linux; Vision's fallback on macOS) | 1.48 s | 0.008 | 1.81 GB |
+| ocrs 0.13 (Windows and Linux until LightOn is downloaded) | 0.13 s* | 0.183 (Latin-script images: 0.078) | not measured |
 
 ocrs reads Latin script only: the Arabic, Russian and Chinese images score ~1.0. On the other 15 it is at or under
 0.01 on ordinary text and weakest on tiny text and tables (0.14-0.33). *Measured on the Mac (`--features ocrs`)
@@ -90,3 +90,24 @@ both runs under the same load) and peaked at 3.4 GB RSS vs 2.1 GB for LightOn (`
 chart-to-code). Command: `OCR_BENCH_NOWAIT=1 cargo run --release -p dtfu-ocr --features lighton --example ocr_bench --
 evals/ocr/corpus_multi 1 vision,lighton` (Flash was run through the same backend with a temporary local patch for its
 file names and prompt). The machine was loaded during these runs, so the times compare engines, not final speeds.
+
+### Default engines
+
+Off macOS the default is LightOnOCR (above). On macOS it is Vision, falling back to LightOnOCR when Vision finds no
+text or the mean confidence of its lines is under 0.6 (`VISION_MIN_CONFIDENCE`). Vision's confidences come in steps
+(0.3, 0.5, 1.0): every image it misread averaged 0.5 or less (Bengali, Greek, Tamil 0.30; Hebrew, Hindi 0.50); of the
+images it read correctly, five averaged under 0.6 (mixed-script menus, a small Traditional Chinese line), which
+LightOn reads as well. Persian (0.75, Vision CER 0.137) stays with Vision. Command: `swiftc -O
+evals/ocr/vision_confidence.swift -o /tmp/vc && /tmp/vc evals/ocr/corpus evals/ocr/corpus_multi`.
+
+| macOS default path (`ocr_bench ... default`) | main corpus | 16 languages | median per image |
+|---|---|---|---|
+| Vision alone | 0.050 | 0.332 | 0.1 s |
+| Vision + LightOn fallback | 0.049 | 0.0195 | 0.2-0.3 s (LightOn on 2 of 19 and 7 of 16 images) |
+
+Vision's two tiny-text misses (0.34 and 0.20) report full confidence, so the fallback does not catch them. Under load
+(1-min load average ~25), n=1.
+
+LightOn image size: the model card allows a 2048 px longest side; on the 2560x1440 Retina image 2048 px took 6.19 s,
+1536 px 3.03 s, 1280 px 2.37 s, all with 0 errors, and 1024 px 1.65 s with errors starting (and 0.086 on the tiny 8 pt
+image). The default is 1280 px on every platform (`DTFU_OCR_MAX_SIDE`). Median of 3, under load (~40).

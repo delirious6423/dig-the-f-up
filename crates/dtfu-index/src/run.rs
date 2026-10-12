@@ -296,6 +296,9 @@ fn merge_states(into: &mut BTreeMap<String, usize>, from: BTreeMap<String, usize
 /// How long one file may spend in prepare. A share that stops answering blocks reads for minutes or forever and threads
 /// cannot be cancelled, so a file that exceeds this is left pending (`Unavailable`) and its helper thread abandoned.
 pub const PREPARE_DEADLINE: Duration = Duration::from_secs(120);
+/// Time spent in OCR does not count toward `PREPARE_DEADLINE` (OCR reads pixels already in memory, and LightOnOCR
+/// serves one image at a time, so a screenshot can wait minutes behind others on a slow CPU), up to this much.
+const OCR_ALLOWANCE: Duration = Duration::from_secs(15 * 60);
 /// Abandoned (still blocked) helper threads allowed at once; at this many the run stops preparing new files.
 const MAX_LEAKED: usize = 4;
 
@@ -321,6 +324,49 @@ fn volume_key(path: &str) -> String {
     key.to_string_lossy().into_owned()
 }
 
+/// How long one helper has spent in OCR (finished calls plus the one in progress). One short-held lock keeps the
+/// two fields consistent for the waiter (never held during OCR itself).
+#[derive(Default)]
+struct OcrClock(Mutex<(Duration, Option<Instant>)>);
+impl OcrClock {
+    fn enter(&self) {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).1 = Some(Instant::now());
+    }
+    fn leave(&self) {
+        let mut g = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(since) = g.1.take() {
+            g.0 += since.elapsed();
+        }
+    }
+    /// Time in OCR so far, and whether a call is in progress.
+    fn spent(&self) -> (Duration, bool) {
+        let g = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        (g.0 + g.1.map_or(Duration::ZERO, |s| s.elapsed()), g.1.is_some())
+    }
+}
+
+thread_local! {
+    /// The clock of the prepare running on this helper thread (set by `Guard::prepare`).
+    static OCR_CLOCK: std::cell::RefCell<Option<Arc<OcrClock>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Waits for the helper's result. Time the helper spends in OCR is not counted, up to `OCR_ALLOWANCE`.
+fn wait_excluding_ocr<T>(rx: &std::sync::mpsc::Receiver<T>, deadline: Duration, clock: &OcrClock) -> Option<T> {
+    let start = Instant::now();
+    loop {
+        let (spent, in_ocr) = clock.spent();
+        let used = start.elapsed().saturating_sub(spent.min(OCR_ALLOWANCE));
+        let left = deadline.checked_sub(used).filter(|d| !d.is_zero())?;
+        // While OCR runs, `left` does not shrink: wait in steps instead of spinning on a tiny remainder.
+        let step = if in_ocr { left.max(Duration::from_millis(250)) } else { left };
+        match rx.recv_timeout(step) {
+            Ok(v) => return Some(v),
+            Err(RecvTimeoutError::Disconnected) => return None,
+            Err(RecvTimeoutError::Timeout) => {}
+        }
+    }
+}
+
 /// Lends the borrowed `Ocr` to helper threads that may outlive the run. Once the run is over `alive` is false and the
 /// pointer is never touched again (the write lock waits for calls in flight).
 struct OcrGate {
@@ -329,12 +375,18 @@ struct OcrGate {
 }
 impl Ocr for OcrGate {
     fn recognize(&self, width: usize, height: usize, rgb: &[u8]) -> Option<String> {
-        let alive = self.alive.read().ok()?;
-        if *alive {
-            self.ocr.recognize(width, height, rgb)
-        } else {
-            None
+        let clock = OCR_CLOCK.with(|c| c.borrow().clone());
+        if let Some(c) = &clock {
+            c.enter(); // before the lock: waiting for it is OCR time too
         }
+        let out = match self.alive.read() {
+            Ok(alive) if *alive => self.ocr.recognize(width, height, rgb),
+            _ => None,
+        };
+        if let Some(c) = &clock {
+            c.leave();
+        }
+        out
     }
 }
 struct CloseGate(Arc<OcrGate>);
@@ -421,8 +473,11 @@ impl Guard {
         let id = permit.0;
         let (tx, rx) = std::sync::mpsc::channel();
         let (owned, opts, gate) = (job.clone(), self.opts.clone(), self.gate.clone());
+        let clock = Arc::new(OcrClock::default());
+        let helper_clock = clock.clone();
         let spawned = std::thread::Builder::new().name("dtfu-prepare".into()).stack_size(8 << 20).spawn(move || {
             let _permit = permit; // released on return and on panic
+            OCR_CLOCK.with(|c| *c.borrow_mut() = Some(helper_clock));
             #[cfg(test)]
             test_hang(&owned);
             let prepared = prepare(&owned, &opts, &*gate);
@@ -431,9 +486,9 @@ impl Guard {
         if spawned.is_err() {
             return unavailable("cannot start a reader thread".into()); // the closure (and its permit) is dropped
         }
-        match rx.recv_timeout(self.deadline) {
-            Ok(prepared) => prepared,
-            Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => {
+        match wait_excluding_ocr(&rx, self.deadline, &clock) {
+            Some(prepared) => prepared,
+            None => {
                 mark_hung(id); // no-op when the helper already finished
                 unavailable(format!("timed out reading {}", job.file.path))
             }
@@ -758,6 +813,32 @@ mod tests {
         let started_here = HANG_STARTED.lock().unwrap().iter().filter(|p| p.starts_with(root.to_str().unwrap())).count();
         assert_eq!(started_here, 1);
         assert_eq!(store.pending_count().unwrap(), 4);
+    }
+
+    #[test]
+    fn ocr_time_does_not_count_toward_the_deadline() {
+        let clock = Arc::new(OcrClock::default());
+        let (tx, rx) = std::sync::mpsc::channel();
+        let c = clock.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            c.enter();
+            std::thread::sleep(Duration::from_millis(400)); // OCR, longer than the deadline
+            c.leave();
+            std::thread::sleep(Duration::from_millis(50));
+            let _ = tx.send(7);
+        });
+        assert_eq!(wait_excluding_ocr(&rx, Duration::from_millis(300), &clock), Some(7));
+        assert!(clock.spent().0 >= Duration::from_millis(400), "{:?}", clock.spent());
+    }
+
+    #[test]
+    fn time_outside_ocr_still_times_out() {
+        let clock = OcrClock::default();
+        let (_tx, rx) = std::sync::mpsc::channel::<u8>();
+        let t = Instant::now();
+        assert_eq!(wait_excluding_ocr(&rx, Duration::from_millis(150), &clock), None);
+        assert!(t.elapsed() < Duration::from_millis(1000), "{:?}", t.elapsed());
     }
 
     #[test]

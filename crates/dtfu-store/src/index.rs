@@ -310,6 +310,19 @@ impl IndexStore {
         Ok(ids.len())
     }
 
+    /// Queues every finished file of `kind` again (for example screenshots once a better OCR engine is installed).
+    pub fn requeue_kind(&mut self, kind: FileKind) -> Result<usize> {
+        let ids: Vec<i64> = self
+            .conn
+            .prepare("SELECT id FROM files WHERE kind = ?1 AND state = 'done'")?
+            .query_map(params![kind.as_str()], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        for &id in &ids {
+            self.requeue(id, None)?;
+        }
+        Ok(ids.len())
+    }
+
     /// Same file at a new path (a move or rename): only the path and the name keywords change; nothing is re-embedded.
     pub fn move_file(&mut self, id: i64, new_path: &str) -> Result<()> {
         let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -1121,6 +1134,12 @@ mod tests {
         assert_eq!(state(&s, photo), FileState::Done);
         assert_eq!(state(&s, pending), FileState::Pending);
         assert_eq!(s.requeue_lacking(FileKind::Screenshot, SegmentKind::Ocr).unwrap(), 0);
+        // requeue_kind takes every finished file of the kind, with or without the segment.
+        s.finish(bare, FileState::Done, None, &Default::default()).unwrap();
+        assert_eq!(s.requeue_kind(FileKind::Screenshot).unwrap(), 2);
+        assert_eq!(state(&s, bare), FileState::Pending);
+        assert_eq!(state(&s, read), FileState::Pending);
+        assert_eq!(state(&s, photo), FileState::Done);
     }
 
     #[test]

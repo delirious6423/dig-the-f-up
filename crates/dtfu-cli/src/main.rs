@@ -76,7 +76,8 @@ fn load_embedder(text_only: bool) -> Result<Embedder> {
 }
 
 /// `dtfu download`: fetches the model files that are missing (resumable): the two embedding models into the models
-/// folder and, off macOS, the two `ocrs` OCR models into `dtfu_models::ocrs_dir()`.
+/// folder, the two LightOnOCR files into `dtfu_models::lighton_dir()` and, off macOS, the two `ocrs` OCR models into
+/// `dtfu_models::ocrs_dir()`.
 fn cmd_download() -> Result<()> {
     let dir = dtfu_models::models_dir();
     std::fs::create_dir_all(&dir)?;
@@ -87,10 +88,17 @@ fn cmd_download() -> Result<()> {
         std::fs::create_dir_all(&ocr)?;
         wanted.extend(dtfu_models::OCRS_FILES.into_iter().map(|f| (f, ocr.clone(), Some(dtfu_models::OCRS_BASE_URL))));
     }
+    let lighton_url = dtfu_models::lighton_base_url();
+    let lighton = dtfu_models::lighton_dir();
+    std::fs::create_dir_all(&lighton)?;
+    wanted.extend(dtfu_models::LIGHTON_FILES.into_iter().map(|f| (f, lighton.clone(), Some(lighton_url.as_str()))));
     for (file, dir, base_url) in wanted {
-        let present = match base_url {
-            None => dtfu_models::locate(&file),
-            Some(_) => Some(dir.join(file.name)).filter(|p| std::fs::metadata(p).is_ok_and(|m| m.len() == file.bytes)),
+        let present = if dtfu_models::LIGHTON_FILES.contains(&file) {
+            dtfu_models::locate_lighton(&file)
+        } else if base_url.is_none() {
+            dtfu_models::locate(&file)
+        } else {
+            Some(dir.join(file.name)).filter(|p| std::fs::metadata(p).is_ok_and(|m| m.len() == file.bytes))
         };
         if let Some(found) = present {
             // The lookup only compares sizes; a download command is the place to pay for the checksum.

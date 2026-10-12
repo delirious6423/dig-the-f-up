@@ -10,7 +10,7 @@ name = "dtfu"
 path = "src/main.rs"
 
 [features]
-# Lets `DTFU_OCR=lighton` select the LightOnOCR-3 engine during indexing.
+# Kept for old build commands: LightOnOCR-3 is now on by default (dtfu-ocr default feature).
 lighton = ["dtfu-index/lighton"]
 
 [dependencies]

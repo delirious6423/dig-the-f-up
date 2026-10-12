@@ -2,10 +2,23 @@
 //! `evals/ocr/gen_corpus.swift`). Per engine: median / p95 seconds per image, characters recognized, and the
 //! character error rate (CER) against the ground truth with all whitespace removed.
 //!
-//! `cargo run --release -p dtfu-ocr --features lighton --example ocr_bench -- <corpus-dir> <reps> <engine,...> [--out dir]`
+//! `cargo run --release -p dtfu-ocr --example ocr_bench -- <corpus-dir> <reps> <engine,...> [--out dir]`
+//! Engines: `vision`, `ocrs`, `lighton`, or `default` (what indexing uses: `recognize_rgb`, with its fallbacks).
 //! Timing only starts when the 1-minute load average is below 4 (waits up to 25 min); the load observed during the
 //! timed runs is printed per engine. `--out dir` also writes each engine's recognized text to `<dir>/<engine>/<name>.txt`.
-use dtfu_ocr::{recognize_rgb_with, Engine};
+use dtfu_ocr::{recognize_rgb, recognize_rgb_with, Engine};
+
+/// One engine, or `None` for the default path (`recognize_rgb`).
+type Which = Option<Engine>;
+fn which_name(w: Which) -> &'static str {
+    w.map_or("default", Engine::name)
+}
+fn run_which(w: Which, width: usize, height: usize, rgb: &[u8]) -> Option<String> {
+    match w {
+        Some(e) => recognize_rgb_with(e, width, height, rgb),
+        None => recognize_rgb(width, height, rgb),
+    }
+}
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -76,7 +89,10 @@ fn main() {
     }
     let dir = PathBuf::from(&args[0]);
     let reps: usize = args[1].parse().expect("reps");
-    let engines: Vec<Engine> = args[2].split(',').map(|n| Engine::parse(n).unwrap_or_else(|| panic!("engine {n}"))).collect();
+    let engines: Vec<Which> = args[2]
+        .split(',')
+        .map(|n| if n.trim() == "default" { None } else { Some(Engine::parse(n).unwrap_or_else(|| panic!("engine {n}"))) })
+        .collect();
     let out_dir = args.iter().position(|a| a == "--out").map(|i| PathBuf::from(&args[i + 1]));
 
     let mut names: Vec<String> = std::fs::read_dir(&dir)
@@ -97,23 +113,23 @@ fn main() {
     println!("corpus {} images, reps {reps}", images.len());
 
     for engine in engines {
-        if !engine.is_compiled() {
-            println!("## {}: not compiled in", engine.name());
+        if !engine.is_none_or(Engine::is_compiled) {
+            println!("## {}: not compiled in", which_name(engine));
             continue;
         }
         let t = Instant::now();
         // First call loads models (excluded from the per-image times) and shows whether the engine works at all.
-        let warm = recognize_rgb_with(engine, images[0].1, images[0].2, &images[0].3);
+        let warm = run_which(engine, images[0].1, images[0].2, &images[0].3);
         let warm_s = t.elapsed().as_secs_f64();
-        if warm.is_none() && engine != Engine::Vision {
+        if warm.is_none() && engine.is_some_and(|e| e != Engine::Vision) {
             // None can also mean "no text"; the corpus's first image has text, so treat it as unavailable.
-            println!("## {}: unavailable (no output on the warm-up image; models missing?)", engine.name());
+            println!("## {}: unavailable (no output on the warm-up image; models missing?)", which_name(engine));
             continue;
         }
         let idle = wait_for_idle();
         let mut times = Vec::new();
         let (mut max_load, mut total_chars, mut total_err, mut total_truth) = (0f64, 0usize, 0usize, 0usize);
-        println!("## {} (first call incl. model load {warm_s:.2}s; started at load {:.2}{})", engine.name(), load1(), if idle { "" } else { " NOT IDLE" });
+        println!("## {} (first call incl. model load {warm_s:.2}s; started at load {:.2}{})", which_name(engine), load1(), if idle { "" } else { " NOT IDLE" });
         println!("| image | chars | CER | median s |");
         println!("|---|---|---|---|");
         for (name, w, h, rgb, truth) in &images {
@@ -121,7 +137,7 @@ fn main() {
             let mut per = Vec::new();
             for _ in 0..reps {
                 let t = Instant::now();
-                text = recognize_rgb_with(engine, *w, *h, rgb);
+                text = run_which(engine, *w, *h, rgb);
                 per.push(t.elapsed().as_secs_f64());
                 max_load = max_load.max(load1());
             }
@@ -135,7 +151,7 @@ fn main() {
             println!("| {name} | {} | {:.3} | {:.2} |", text.chars().count(), err as f64 / truth.len().max(1) as f64, pct(&per, 0.5));
             times.extend(per);
             if let Some(o) = &out_dir {
-                let d = o.join(engine.name());
+                let d = o.join(which_name(engine));
                 std::fs::create_dir_all(&d).ok();
                 std::fs::write(d.join(format!("{name}.txt")), &text).ok();
             }
@@ -143,7 +159,7 @@ fn main() {
         times.sort_by(|a, b| a.total_cmp(b));
         println!(
             "TOTAL {}: n={} timed runs, median {:.3}s, p95 {:.3}s, chars {total_chars}, micro-CER {:.4}, max 1-min load during timing {max_load:.2}{}\n",
-            engine.name(),
+            which_name(engine),
             times.len(),
             pct(&times, 0.5),
             pct(&times, 0.95),

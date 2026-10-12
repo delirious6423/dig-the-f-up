@@ -11,6 +11,8 @@ dtfu-models = { path = "../dtfu-models", optional = true }
 # ocrs (pure Rust OCR) backend: always compiled off macOS; on macOS only with
 # `--features ocrs` (Apple Vision remains the default there).
 [features]
+# LightOnOCR-3 is the default engine off macOS and the fallback for Vision on macOS (docs/BENCHMARKS.md, OCR).
+default = ["lighton"]
 ocrs = ["dep:ocrs", "dep:rten"]
 # LightOnOCR-3-0.8B through the vendored llama.cpp (needs build-llama; see docs/BENCHMARKS.md, OCR).
 lighton = ["dep:dtfu-llama-sys", "dep:dtfu-models"]

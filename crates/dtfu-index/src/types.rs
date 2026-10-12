@@ -30,10 +30,14 @@ pub trait Ocr: Sync {
     fn ready(&self) -> bool {
         true
     }
+    /// Whether the best engine (LightOnOCR) is installed, so screenshots read by a weaker one are worth reading again.
+    fn best_ready(&self) -> bool {
+        false
+    }
 }
 
-/// The platform's OCR (`dtfu_ocr::recognize_rgb`): Apple Vision on macOS, `ocrs` elsewhere (once its models are
-/// downloaded).
+/// The platform's OCR (`dtfu_ocr::recognize_rgb`): Apple Vision with LightOnOCR as its fallback on macOS; LightOnOCR
+/// elsewhere, `ocrs` until LightOn's models are downloaded.
 pub struct SystemOcr;
 impl Ocr for SystemOcr {
     fn recognize(&self, width: usize, height: usize, rgb: &[u8]) -> Option<String> {
@@ -41,6 +45,9 @@ impl Ocr for SystemOcr {
     }
     fn ready(&self) -> bool {
         dtfu_ocr::ready()
+    }
+    fn best_ready(&self) -> bool {
+        dtfu_ocr::lighton_available()
     }
 }
 
