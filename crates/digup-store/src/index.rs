@@ -416,6 +416,18 @@ impl IndexStore {
         Ok((files as usize, left as usize))
     }
 
+    /// Where a long file's reading got to, from its stored segments: the largest `loc` of its page, page_image and
+    /// chunk segments (`IndexStore.lastPlace`, IS:355). `None` when nothing is stored for it.
+    pub fn last_place(&self, file_id: i64) -> Result<Option<f64>> {
+        let last: Option<f64> = self
+            .conn
+            .prepare_cached(
+                "SELECT MAX(loc) FROM segments WHERE file = ?1 AND kind IN ('page', 'page_image', 'chunk')",
+            )?
+            .query_row([file_id], |r| r.get(0))?;
+        Ok(last)
+    }
+
     /// What indexing learned about a file: the `info` JSON object, with string values. Empty when absent or unreadable.
     pub fn info(&self, id: i64) -> Result<BTreeMap<String, String>> {
         let json: Option<String> = self
@@ -767,6 +779,30 @@ mod tests {
             text: None,
             vector: Some(v),
         }
+    }
+
+    #[test]
+    fn last_place_is_the_largest_stored_page_or_chunk_loc() {
+        let dir = TempDir::new();
+        let mut s = store(&dir);
+        let long = s.insert_file(&file_of("/d/long.pdf", FileKind::Pdf, 1.0), &[]).unwrap();
+        let other = s.insert_file(&file_of("/d/other.pdf", FileKind::Pdf, 2.0), &[]).unwrap();
+        assert_eq!(s.last_place(long).unwrap(), None);
+        let at = |kind: SegmentKind, loc: Option<f64>| NewSegment {
+            kind,
+            modality: Modality::Text,
+            loc,
+            loc_end: None,
+            excerpt: None,
+            text: Some("words".into()),
+            vector: None,
+        };
+        s.add_segments(long, &[at(SegmentKind::Page, Some(3.0)), at(SegmentKind::Page, Some(12.0))]).unwrap();
+        s.add_segments(long, &[at(SegmentKind::PageImage, Some(20.0)), at(SegmentKind::Frame, Some(99.0))]).unwrap();
+        s.add_segments(long, &[at(SegmentKind::Chunk, Some(7.0)), at(SegmentKind::Ocr, Some(500.0))]).unwrap();
+        // Only page, page_image and chunk count (as Swift's query does); the frame and OCR rows above are ignored.
+        assert_eq!(s.last_place(long).unwrap(), Some(20.0));
+        assert_eq!(s.last_place(other).unwrap(), None);
     }
 
     fn scalar(s: &IndexStore, sql: &str) -> i64 {

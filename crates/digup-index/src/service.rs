@@ -224,7 +224,8 @@ impl Service {
                 match make_embedder() {
                     Ok(e) => {
                         for part in std::iter::once(&mut self.main).chain(self.code.as_mut()) {
-                            check_model(&mut part.store, e.as_ref(), &opts, part.code, false)?;
+                            // Like the Swift index service (main.swift:409 resetOnModelChange): a new model or settings reindexes.
+                            check_model(&mut part.store, e.as_ref(), &opts, part.code, true)?;
                         }
                         embedder = Some(e);
                     }

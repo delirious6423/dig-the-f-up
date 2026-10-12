@@ -1229,7 +1229,7 @@ pub fn terms(text: &str) -> Vec<String> {
     let mut seen: HashSet<&str> = HashSet::new();
     normalized
         .split(|c: char| !text::is_word_char(c))
-        .filter(|w| glen(w) >= 2 && !STOPWORDS.contains(w))
+        .filter(|w| w.chars().count() >= 2 && !STOPWORDS.contains(w)) // Swift: unicodeScalars.count
         .filter(|w| seen.insert(w))
         .map(str::to_string)
         .collect()
@@ -1269,7 +1269,7 @@ pub fn kind_hints(text: &str) -> Vec<FileKind> {
             .or_else(|| {
                 KIND_WORDS
                     .iter()
-                    .find(|(k, _)| text::inflects(k) && glen(k) >= 3 && word.starts_with(k))
+                    .find(|(k, _)| text::inflects(k) && k.chars().count() >= 3 && word.starts_with(k))
             })
             .map(|(_, kind)| *kind);
         if let Some(kind) = kind {
@@ -1372,6 +1372,10 @@ mod tests {
         assert_eq!(kind_hints("ভিডিওতে কুমির"), vec![FileKind::Video]);
         assert_eq!(kind_hints("صورة قطة"), vec![FileKind::Image]);
         assert!(kind_hints("tax return 2023").is_empty());
+        // Swift counts unicode scalars, not graphemes: "ছবি" and "গান" are 3 scalars but 2 graphemes.
+        assert_eq!(kind_hints("ছবিতে কুমির"), vec![FileKind::Image]);
+        assert_eq!(kind_hints("গানে"), vec![FileKind::Audio]);
+        assert_eq!(terms("মা বই"), vec!["মা".to_string(), "বই".to_string()]);
     }
 
     #[test]

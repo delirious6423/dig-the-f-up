@@ -45,7 +45,7 @@ fn to_new_file(c: &Candidate) -> Result<NewFile> {
 
 /// Crawls `roots` and reconciles the index: new files are queued, changed ones re-queued, moved ones re-pathed
 /// (no re-embedding), and files that are gone or newly excluded are removed. Rows under a root that no longer exists
-/// on disk are kept. Each store call commits on its own (the store API has no outer transaction).
+/// on disk, or that can't be read, are kept (and not crawled). Each store call commits on its own (the store API has no outer transaction).
 pub fn sync(store: &mut IndexStore, roots: &[PathBuf], opts: &IndexOptions, code: bool) -> Result<SyncSummary> {
     let copts = CrawlOptions {
         code,
@@ -56,7 +56,11 @@ pub fn sync(store: &mut IndexStore, roots: &[PathBuf], opts: &IndexOptions, code
         excluded_folders: opts.excluded_folders.iter().map(|p| root_string(p)).collect(),
         ..CrawlOptions::default()
     };
-    let report = crawl(roots, &copts);
+    // A root that can't be listed (gone, or permission denied) is skipped entirely: it contributes no candidates and its
+    // rows are kept (see `vanished` below).
+    let (readable, unreadable): (Vec<PathBuf>, Vec<PathBuf>) =
+        roots.iter().cloned().partition(|r| std::fs::read_dir(r).is_ok());
+    let report = crawl(&readable, &copts);
     let root_strings: Vec<String> = roots.iter().map(|r| root_string(r)).collect();
     let existing = store.files_under(&root_strings)?;
 
@@ -111,11 +115,12 @@ pub fn sync(store: &mut IndexStore, roots: &[PathBuf], opts: &IndexOptions, code
         }
     }
 
-    // A root that went away (a drive ejected) looks empty: keep its rows rather than take that for "deleted".
-    let vanished: Vec<String> = root_strings
+    // A root that went away (a drive ejected) or can't be read looks empty: keep its rows rather than take that for
+    // "deleted". Its prefix is in `vanished`, so rows under it survive even when it is nested in a readable root.
+    let vanished: Vec<String> = unreadable
         .iter()
-        .filter(|r| !Path::new(r.as_str()).exists())
-        .map(|r| if r.ends_with('/') { r.clone() } else { format!("{r}/") })
+        .map(|r| root_string(r))
+        .map(|r| if r.ends_with('/') { r } else { format!("{r}/") })
         .collect();
     for row in &existing {
         if !seen.contains(row.path.as_str())
@@ -243,6 +248,36 @@ mod tests {
         fs::remove_dir_all(&root.0).unwrap();
         let s = run(&mut store, &[&root.0]);
         assert_eq!((s.removed, s.added), (0, 0));
+        assert_eq!(all(&store, &root.0).len(), 1);
+    }
+
+    /// Restores a folder's permissions on drop, so the temporary folder can be removed even when the test fails.
+    #[cfg(unix)]
+    struct Restore<'a>(&'a Path);
+    #[cfg(unix)]
+    impl Drop for Restore<'_> {
+        fn drop(&mut self) {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(self.0, fs::Permissions::from_mode(0o755));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_root_keeps_rows() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_d, root, mut store) = setup("unreadable");
+        write(&root.0, "a.txt", "aaa");
+        run(&mut store, &[&root.0]);
+        assert_eq!(all(&store, &root.0).len(), 1);
+        let _restore = Restore(&root.0);
+        fs::set_permissions(&root.0, fs::Permissions::from_mode(0o000)).unwrap();
+        if fs::read_dir(&root.0).is_ok() {
+            // Running as root (or a filesystem without permission checks): the root is readable, so there is nothing to test.
+            return;
+        }
+        let s = run(&mut store, &[&root.0]);
+        assert_eq!((s.removed, s.added, s.unchanged), (0, 0, 0));
         assert_eq!(all(&store, &root.0).len(), 1);
     }
 

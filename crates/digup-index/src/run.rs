@@ -34,8 +34,15 @@ pub struct Event {
 /// Records or checks the vector source and settings fingerprint (Swift `checkModel`). With `reset`, a mismatch empties
 /// the vectors and requeues every file; without, it is an error.
 pub fn check_model(store: &mut IndexStore, embedder: &dyn Embed, opts: &IndexOptions, code: bool, reset: bool) -> Result<Adoption> {
-    let fingerprint = if code { opts.code_fingerprint() } else { opts.fingerprint() };
-    store.adopt(&embedder.vector_source(), &fingerprint, if reset { Mismatch::Reset } else { Mismatch::Refuse })
+    let source = embedder.vector_source();
+    let options = if code { opts.code_fingerprint() } else { opts.fingerprint() };
+    // Indexer.swift:281 stores "{vector_source} | {options}".
+    let fingerprint = format!("{source} | {options}");
+    // Earlier builds of this port stored the options part alone: same model and settings, so upgrade it in place.
+    if store.meta("vector_source")?.as_deref() == Some(source.as_str()) && store.meta("fingerprint")?.as_deref() == Some(options.as_str()) {
+        store.set_meta("fingerprint", Some(&fingerprint))?;
+    }
+    store.adopt(&source, &fingerprint, if reset { Mismatch::Reset } else { Mismatch::Refuse })
 }
 
 /// Moves files the user opens often to the front of their kind. `pending` arrives ordered by kind, then newest first;
@@ -153,7 +160,12 @@ pub fn finish_long_files(
     for file in store.unfinished()? {
         let info = store.info(file.id)?;
         let size = if file.kind == digup_core::FileKind::Pdf { opts.pdf_step } else { opts.doc_step }.max(1);
-        let mut start = info.get("read_to").and_then(|v| v.parse::<usize>().ok()).unwrap_or(0);
+        // Where it stopped: `read_to`, else the last page or chunk stored (`lastPlace`, Indexer.swift:181), else the start.
+        let stored = info.get("read_to").and_then(|v| v.parse::<usize>().ok());
+        let mut start = match stored {
+            Some(at) => at,
+            None => store.last_place(file.id)?.map_or(0, |v| v as usize),
+        };
         let end = info.get("read_end").and_then(|v| v.parse::<usize>().ok()).unwrap_or(0).max(start + 1);
         while start < end {
             jobs.push(Job { file: file.clone(), step: Some(start..(start + size).min(end)), content_hash: None });
@@ -402,6 +414,21 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    #[test]
+    fn fingerprint_is_source_then_options_and_bare_form_upgrades() {
+        let dir = temp("fp");
+        let mut store = IndexStore::open(&dir, "index.sqlite").unwrap();
+        let fake = FakeEmbedder::default();
+        let opts = IndexOptions::default();
+        let want = format!("{} | {}", fake.vector_source(), opts.fingerprint());
+        assert_eq!(check_model(&mut store, &fake, &opts, false, false).unwrap(), Adoption::Fresh);
+        assert_eq!(store.meta("fingerprint").unwrap().as_deref(), Some(want.as_str()));
+        // An index written by an earlier build holds the options part alone.
+        store.set_meta("fingerprint", Some(&opts.fingerprint())).unwrap();
+        assert_eq!(check_model(&mut store, &fake, &opts, false, false).unwrap(), Adoption::Same);
+        assert_eq!(store.meta("fingerprint").unwrap().as_deref(), Some(want.as_str()));
     }
 
     #[test]

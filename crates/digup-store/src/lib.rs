@@ -12,7 +12,6 @@ pub mod index;
 pub mod migrate;
 
 const DDL: &str = r#"
-BEGIN IMMEDIATE;
 CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE files(
     id INTEGER PRIMARY KEY,
@@ -45,7 +44,6 @@ CREATE VIRTUAL TABLE fts USING fts5(
     tokenize = "porter unicode61 remove_diacritics 2 categories 'L* N* Co M*'"
 );
 PRAGMA user_version = 5;
-COMMIT;
 "#;
 
 pub fn open(path: &Path) -> Result<Connection> {
@@ -64,20 +62,72 @@ pub fn open_in_memory() -> Result<Connection> {
 
 fn configure(c: &Connection) -> Result<()> {
     c.busy_timeout(Duration::from_millis(5000))?;
-    c.execute_batch("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA foreign_keys = ON;")?;
+    set_wal(c)?;
+    c.execute_batch("PRAGMA synchronous = NORMAL; PRAGMA foreign_keys = ON;")?;
     Ok(())
 }
 
+/// Switches to WAL. SQLite can return SQLITE_BUSY from this pragma without calling the busy handler when another
+/// process is opening the same fresh file, so retry for the busy timeout's span instead of failing the open.
+fn set_wal(c: &Connection) -> Result<()> {
+    let deadline = std::time::Instant::now() + Duration::from_millis(5000);
+    loop {
+        match c.query_row("PRAGMA journal_mode = WAL", [], |_| Ok(())) {
+            Ok(()) => return Ok(()),
+            Err(rusqlite::Error::SqliteFailure(e, _))
+                if matches!(e.code, rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked)
+                    && std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
+}
+
 fn init(c: &Connection) -> Result<()> {
-    let v: i64 = c.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    if user_version(c)? == 0 {
+        create(c)?;
+    }
+    // Re-read: another process may have created the schema (or moved it on) since the check above.
+    let v = user_version(c)?;
     match v {
-        0 => c.execute_batch(DDL)?,
         SCHEMA_VERSION => {}
         v if v > SCHEMA_VERSION => bail!("index schema {v} is newer than this build ({SCHEMA_VERSION})"),
         1..SCHEMA_VERSION => migrate::migrate(c, v)?,
         v => bail!("index schema {v} is not a valid version"),
     }
     Ok(())
+}
+
+fn user_version(c: &Connection) -> Result<i64> {
+    Ok(c.query_row("PRAGMA user_version", [], |r| r.get(0))?)
+}
+
+/// Creates the schema of a fresh index in one `BEGIN IMMEDIATE` transaction, as `migrate.rs` does for v1-4. The version
+/// is read again inside the transaction, so a second process that opened the same fresh file waits for the first and
+/// then finds the schema there, instead of creating it again.
+fn create(c: &Connection) -> Result<()> {
+    c.execute_batch("BEGIN IMMEDIATE")?;
+    let result = (|| -> Result<()> {
+        if user_version(c)? == 0 {
+            c.execute_batch(DDL)?;
+        }
+        Ok(())
+    })();
+    match result {
+        Ok(()) => {
+            if let Err(e) = c.execute_batch("COMMIT") {
+                let _ = c.execute_batch("ROLLBACK");
+                return Err(e.into());
+            }
+            Ok(())
+        }
+        Err(e) => {
+            let _ = c.execute_batch("ROLLBACK");
+            Err(e)
+        }
+    }
 }
 
 /// Encode an L2-normalized vector as 768 little-endian float16 values (1536 bytes).
@@ -220,6 +270,59 @@ mod tests {
         assert_eq!(hit("\"বাংলা\""), vec![1]);
         assert_eq!(hit("\"ভাষা\""), vec![1]);
         assert_eq!(hit("\"كتاب\""), vec![2]);
+    }
+
+    /// A fresh, empty folder for one test's index; removed on drop.
+    struct Dir(std::path::PathBuf);
+    impl Dir {
+        fn new(tag: &str) -> Self {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            let dir = std::env::temp_dir().join(format!("digup-init-{tag}-{}-{nanos}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            Self(dir)
+        }
+    }
+    impl Drop for Dir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn second_open_of_a_created_fresh_index_is_ok() {
+        let dir = Dir::new("seq");
+        let path = dir.0.join("index.sqlite");
+        drop(open(&path).unwrap());
+        // The first open created the tables; a second open must see v5 and not run the DDL again.
+        let c = open(&path).unwrap();
+        let v: i64 = c.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(v, SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn concurrent_opens_of_a_fresh_index_both_succeed() {
+        // Both threads start from a file with version 0: before the fix, both read 0 and the loser failed with
+        // "table meta already exists". Repeated, because the race is timing-dependent.
+        for round in 0..20 {
+            let dir = Dir::new(&format!("race{round}"));
+            let path = dir.0.join("index.sqlite");
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+            let handles: Vec<_> = (0..2)
+                .map(|_| {
+                    let (path, barrier) = (path.clone(), barrier.clone());
+                    std::thread::spawn(move || {
+                        barrier.wait();
+                        open(&path).map(|c| c.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0)).unwrap())
+                    })
+                })
+                .collect();
+            for h in handles {
+                assert_eq!(h.join().unwrap().unwrap(), SCHEMA_VERSION);
+            }
+        }
     }
 
     #[test]
