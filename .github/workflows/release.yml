@@ -146,9 +146,7 @@ jobs:
           sha="${{ steps.package.outputs.sha }}"
           notes="Draft built from tag ${GITHUB_REF_NAME}. Review, then publish."
           if [[ "${{ steps.secrets.outputs.signing }}" != "true" ]]; then
-            notes="$notes
-
-UNSIGNED BUILD: macOS Gatekeeper will block it on first launch. Right-click Dig-the-f-up.app and choose Open, or see docs/RELEASING.md."
+            notes="$notes"$'\n\n'"UNSIGNED BUILD: macOS Gatekeeper will block it on first launch. Right-click Dig-the-f-up.app and choose Open, or see docs/RELEASING.md."
           fi
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
             gh release upload "$GITHUB_REF_NAME" "$zip" "$sha" --clobber
