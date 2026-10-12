@@ -58,7 +58,7 @@ target/release/dtfu search "a penguin on the ice"
   On Windows and Linux it reads all screenshots (until it has downloaded, two small Latin-only OCR models, 12 MB, fill
   in). On macOS Apple Vision reads first and LightOnOCR takes over where Vision finds no text or is unsure, which
   covers scripts Vision cannot read (Hebrew, Greek, Hindi, Bengali, Tamil and others). Once LightOnOCR is installed,
-  screenshots already indexed are read again once.
+  screenshots already indexed are read again once (on macOS only those where Vision found no text).
 
 ## Your data
 

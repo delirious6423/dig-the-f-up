@@ -33,12 +33,16 @@ const OCR_MISSED: &str = "missed";
 const OCR_DONE: &str = "done";
 /// `meta` key: [`OCR_DONE`] once screenshots were queued again after LightOnOCR's models were installed.
 const OCR_LIGHTON_KEY: &str = "ocr_lighton";
-/// LightOnOCR reads what the engines before it misread (non-Latin scripts with `ocrs`; Hebrew, Greek and the Indic
-/// scripts with Vision, which returns low-confidence guesses that cannot be told apart afterwards): once it can run,
-/// OCR every finished screenshot again, once per index.
+/// Once LightOnOCR can run, OCR screenshots again, once per index. Off macOS every finished screenshot (`ocrs` turns
+/// non-Latin text into wrong Latin text). On macOS only those without OCR text (Vision found nothing); Vision's
+/// low-confidence misreads cannot be told apart afterwards and stay until the file changes (owner's choice: cost).
 fn lighton_backfill(store: &mut IndexStore, ocr: &dyn Ocr) -> Result<()> {
     if ocr.best_ready() && store.meta(OCR_LIGHTON_KEY)?.as_deref() != Some(OCR_DONE) {
-        store.requeue_kind(FileKind::Screenshot)?;
+        if cfg!(target_os = "macos") {
+            store.requeue_lacking(FileKind::Screenshot, SegmentKind::Ocr)?;
+        } else {
+            store.requeue_kind(FileKind::Screenshot)?;
+        }
         store.set_meta(OCR_LIGHTON_KEY, Some(OCR_DONE))?;
     }
     Ok(())
