@@ -149,7 +149,7 @@ packaging, larger-corpus benchmarks, tray icon and the open review items above. 
 - **D6. Exact brute-force search, f16 storage**, parallelised and SIMD'd; an optional int8 or mmap'd sidecar is
   allowed as an *accelerator* but must give the same ranking within tolerance (verify with the evals).
 - **D7. No telemetry, no account.** Update check only if the owner wants it, off by default.
-- **D8. Project is MIT with `NOTICE`** crediting DigUp (MIT), llama.cpp (MIT), EmbeddingGemma 2 (Apache 2.0).
+- **D8. Project is Apache-2.0 (changed from MIT on 2026-10-12) with `NOTICE`** crediting DigUp (MIT), llama.cpp (MIT), EmbeddingGemma 2 (Apache 2.0).
 
 ---------------------------------------------------------------------------------------------------
 
@@ -331,7 +331,7 @@ Before reporting any milestone:
 - **Q1. Reuse Swift-made indexes?** Parity is 0.9997+ for text/audio but images will be ~0.99 (different decoders).
   *Recommended:* separate index directory and a distinct `vector_source` runtime tag for Rust-made indexes; never write
   into a Swift-made index; optionally allow read-only search of one with a warning. Revisit after evals.
-- **Q2. Repo hygiene:** DECIDED: public GitHub repo `delirious6423/dig-the-f-up`, MIT licence, CI on GitHub Actions.
+- **Q2. Repo hygiene:** DECIDED: public GitHub repo `delirious6423/dig-the-f-up`, Apache-2.0 licence (was MIT), CI on GitHub Actions.
 - **Q3. Desktop shell:** Tauri 2 (web UI, small, cross-platform tray/hotkey/updater) vs `egui`/`iced` (pure Rust).
   *Recommended:* Tauri 2 with a minimal front end; keep the engine headless behind a clean API so the CLI and app share it.
 - **Q4. OCR strategy off-Mac:** `ocrs` (pure Rust, lighter) vs Tesseract/PaddleOCR. *Recommended:* start with `ocrs`

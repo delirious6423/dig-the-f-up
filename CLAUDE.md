@@ -16,7 +16,7 @@ and open questions.
    these without updating `docs/spec-store-search.md` and deciding the `vector_source` tag question (HANDOFF section 11).
 4. **Don't modify `reference/digup-swift/`** (fetched by `scripts/fetch-reference.sh`, git-ignored, read-only). It is the Swift source at commit `6faa29e` that every
    `file:line` citation in `docs/spec-*.md` points to.
-5. **Licensing:** keep `NOTICE` (DigUp is MIT; llama.cpp MIT; EmbeddingGemma 2 Apache 2.0).
+5. **Licensing:** the project is Apache-2.0 (`LICENSE`). Keep `NOTICE` (DigUp is MIT; llama.cpp MIT; EmbeddingGemma 2 Apache 2.0).
 6. Measure, don't guess. Every performance claim in code comments, docs or reports must come from a benchmark that
    was run, with the machine and command noted. Estimates are labelled as estimates.
 

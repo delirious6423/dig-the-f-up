@@ -54,5 +54,5 @@ The desktop app: see [`app/README.md`](app/README.md).
 
 ## Licence
 
-MIT, see `LICENSE`. Dig-the-f-up is based on DigUp (MIT) and links llama.cpp (MIT). The embedding model is
+Apache License 2.0, see `LICENSE`. Dig-the-f-up is based on DigUp (MIT) and links llama.cpp (MIT). The embedding model is
 EmbeddingGemma 2 and has its own terms. See `NOTICE` and `docs/THIRD-PARTY.md`.
