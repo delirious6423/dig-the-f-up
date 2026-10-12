@@ -1,0 +1,3 @@
+Boarding pass
+Flight LH 717  Gate B32  Seat 14C
+Departure 07:55  Boarding 07:15

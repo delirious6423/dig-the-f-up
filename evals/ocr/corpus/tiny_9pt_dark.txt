@@ -1,0 +1,4 @@
+$ docker ps --format '{{.Names}}'
+api-1  db-1  cache-1
+$ curl -s localhost:8080/health
+{"status":"ok","uptime":86412}
