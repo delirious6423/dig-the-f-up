@@ -32,7 +32,7 @@ One folder, `~/Library/Application Support/DigUp/` (`dirs::data_dir()/DigUp`):
 | `index/` | the search index (SQLite) |
 | `settings.json` | your indexed-folder list and options |
 | `Models/` | the two model files (`embeddinggemma-2-Q8_0.gguf`, `mmproj-embeddinggemma-2-Q8_0.gguf`) |
-| `logs/digup.log` | the local log (see Logs); `digup.log.1` holds the previous 1 MiB |
+| `logs/digup.log` | the local log (see Logs); `digup.log.1` holds the previous 1 MiB. Lives in whichever of `DigUp/` or `DigUp-rs/` is in use (see below) |
 
 Earlier builds used `~/Library/Application Support/DigUp-rs/` for the index and settings. Nothing is moved: if
 `DigUp/` has no index or settings yet and `DigUp-rs/` has them, the app keeps using `DigUp-rs/` in place. Models

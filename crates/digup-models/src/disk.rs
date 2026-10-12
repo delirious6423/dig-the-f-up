@@ -10,7 +10,7 @@ use std::path::Path;
 
 const GIB: f64 = (1u64 << 30) as f64;
 
-/// Bytes still to download for `files` into `dir`: a finished file counts as 0, a `.part` counts as already done.
+/// Bytes still to download for `files` into `dir`: a finished file counts as 0, a `.part` counts as already done (unless it is longer than the file, which is discarded).
 pub fn remaining_bytes(dir: &Path, files: &[ModelFile]) -> u64 {
     files
         .iter()
@@ -22,7 +22,11 @@ pub fn remaining_bytes(dir: &Path, files: &[ModelFile]) -> u64 {
             let part_len = std::fs::metadata(dir.join(format!("{}.part", file.name)))
                 .map(|m| m.len())
                 .unwrap_or(0);
-            file.bytes.saturating_sub(part_len.min(file.bytes))
+            // A `.part` longer than the file is not resumable: `download` deletes it and starts over, so all of it is owed.
+            if part_len > file.bytes {
+                return file.bytes;
+            }
+            file.bytes - part_len
         })
         .sum()
 }
@@ -136,10 +140,10 @@ mod tests {
     }
 
     #[test]
-    fn oversized_part_counts_as_done() {
+    fn oversized_part_is_discarded_so_the_whole_file_is_owed() {
         let d = tempfile::tempdir().unwrap();
         std::fs::write(d.path().join("a.gguf.part"), vec![0u8; 5000]).unwrap();
-        assert_eq!(remaining_bytes(d.path(), &[FILE]), 0);
+        assert_eq!(remaining_bytes(d.path(), &[FILE]), FILE.bytes);
     }
 
     #[test]

@@ -83,17 +83,28 @@ jobs:
         working-directory: app
         run: cargo tauri build --bundles app
 
-      # Tauri 2 signs and (when APPLE_ID is set) notarizes during the build when these variables are present.
-      - name: Build signed bundle
-        if: steps.secrets.outputs.signing == 'true'
+      # Tauri 2 signs during the build when the certificate variables are present and also notarizes when APPLE_ID,
+      # APPLE_PASSWORD and APPLE_TEAM_ID are present. The bundler tests that a variable EXISTS, not that it is non-empty,
+      # so the notarization variables must be absent (not set to '') on the signing-only path: two separate steps.
+      - name: Build signed bundle (sign only)
+        if: steps.secrets.outputs.signing == 'true' && steps.secrets.outputs.notarize != 'true'
         working-directory: app
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ steps.secrets.outputs.notarize == 'true' && secrets.APPLE_ID || '' }}
-          APPLE_PASSWORD: ${{ steps.secrets.outputs.notarize == 'true' && secrets.APPLE_PASSWORD || '' }}
-          APPLE_TEAM_ID: ${{ steps.secrets.outputs.notarize == 'true' && secrets.APPLE_TEAM_ID || '' }}
+        run: cargo tauri build --bundles app
+
+      - name: Build signed and notarized bundle
+        if: steps.secrets.outputs.signing == 'true' && steps.secrets.outputs.notarize == 'true'
+        working-directory: app
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: cargo tauri build --bundles app
 
       - name: Verify signature and notarization ticket
