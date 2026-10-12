@@ -227,12 +227,21 @@ impl IndexStore {
         Ok(id)
     }
 
-    /// Adds segments to a file in one transaction (one step of extraction).
+    /// Adds segments to a file in one transaction (one step of extraction). Also bumps the file's `indexed_at`
+    /// (strictly increasing), because a cached `digup_search::Searcher::refresh` finds changed files by the
+    /// fingerprint of their `files` row.
+    ///
+    /// FINGERPRINT CONTRACT: every writer that inserts, deletes or replaces a file's segments or vectors must also
+    /// change that file's row (`state`, `indexed_at` or `info`) in the same transaction, or delete the file.
+    /// Segment ids are reused after a delete, so without it a refresh cannot see the change.
     pub fn add_segments(&mut self, file_id: i64, segments: &[NewSegment]) -> Result<()> {
         let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         for segment in segments {
             insert_segment(&tx, file_id, segment)?;
         }
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0);
+        tx.prepare_cached("UPDATE files SET indexed_at = max(?1, coalesce(indexed_at, 0) + 0.000001) WHERE id = ?2")?
+            .execute(params![now, file_id])?;
         tx.commit()?;
         Ok(())
     }

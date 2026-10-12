@@ -117,7 +117,7 @@ impl World {
             return "add";
         }
         let (id, kind) = files[rng.below(files.len())].clone();
-        match rng.below(7) {
+        match rng.below(8) {
             0 | 1 => {
                 self.add_file(rng);
                 "add"
@@ -147,8 +147,9 @@ impl World {
                         .unwrap();
                     let n = 1 + rng.below(12);
                     self.fill(rng, fid, &k, n, have as usize);
+                    // `IndexStore::add_segments` bumps `indexed_at` in the same transaction; so does this.
+                    let at = self.tick();
                     if rng.below(2) == 0 {
-                        let at = self.tick();
                         let pages = 55 + rng.below(40);
                         self.w
                             .execute(
@@ -156,6 +157,8 @@ impl World {
                                 params![format!(r#"{{"pages":"{pages}"}}"#), at, fid],
                             )
                             .unwrap();
+                    } else {
+                        self.w.execute("UPDATE files SET indexed_at = ?1 WHERE id = ?2", params![at, fid]).unwrap();
                     }
                 }
                 "step"
@@ -166,6 +169,27 @@ impl World {
                 let at = self.tick();
                 self.w.execute("UPDATE files SET kind = ?1, indexed_at = ?2 WHERE id = ?3", params![new, at, id]).unwrap();
                 "kind"
+            }
+            7 => {
+                // The file holding the highest segment ids goes away and rows are added to another file in the
+                // same window: SQLite reuses the freed ids, so new rows get ids at or below the last loaded one.
+                let top: Option<i64> = self.w.query_row("SELECT file FROM segments ORDER BY id DESC LIMIT 1", [], |r| r.get(0)).ok();
+                if let Some(top) = top {
+                    self.delete_segments(top);
+                    self.w.execute("DELETE FROM segments WHERE file = ?1", [top]).unwrap();
+                    self.w.execute("DELETE FROM files WHERE id = ?1", [top]).unwrap();
+                    if let Some((fid, k)) = self.files().into_iter().find(|(_, k)| k == "doc" || k == "pdf") {
+                        let have: i64 = self
+                            .w
+                            .query_row("SELECT count(*) FROM segments WHERE file = ?1 AND kind != 'name'", [fid], |r| r.get(0))
+                            .unwrap();
+                        let count = 1 + rng.below(4);
+                        self.fill(rng, fid, &k, count, have as usize);
+                        let at = self.tick();
+                        self.w.execute("UPDATE files SET indexed_at = ?1 WHERE id = ?2", params![at, fid]).unwrap();
+                    }
+                }
+                "delete-top"
             }
             _ => {
                 // Info only (pages), no segment change.
@@ -265,5 +289,5 @@ fn refresh_matches_a_fresh_searcher_over_random_mutations() {
     assert!(compared_hits > 1000, "the queries must find something");
     assert!(incr_eager > steps * 3 / 4, "the incremental path must be what ran: {incr_eager} of {steps}");
     assert!(incr_default > 0 && full_default > 0, "both paths of the default searcher must be exercised");
-    assert_eq!(kinds_seen.len(), 6);
+    assert_eq!(kinds_seen.len(), 7);
 }

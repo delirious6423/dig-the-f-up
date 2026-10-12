@@ -71,12 +71,12 @@ fn sets_scale(file_kind: &str, kind: &str, loc: Option<f64>, pages: Option<i64>)
     !later
 }
 
-fn fingerprint(kind: &str, state: rusqlite::types::ValueRef, indexed_at: rusqlite::types::ValueRef, info: rusqlite::types::ValueRef) -> u64 {
+fn fingerprint(kind: &str, rest: [rusqlite::types::ValueRef; 6]) -> u64 {
     use rusqlite::types::ValueRef;
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     kind.hash(&mut h);
-    for v in [state, indexed_at, info] {
+    for v in rest {
         match v {
             ValueRef::Null => 0u8.hash(&mut h),
             ValueRef::Integer(i) => (1u8, i).hash(&mut h),
@@ -87,13 +87,24 @@ fn fingerprint(kind: &str, state: rusqlite::types::ValueRef, indexed_at: rusqlit
     h.finish()
 }
 
+const FILES_SQL: &str = "SELECT id, kind, state, indexed_at, info, path, size, mtime FROM files";
+
+fn row_fingerprint(r: &rusqlite::Row) -> Result<u64> {
+    Ok(fingerprint(
+        r.get_ref(1)?.as_str()?,
+        [r.get_ref(2)?, r.get_ref(3)?, r.get_ref(4)?, r.get_ref(5)?, r.get_ref(6)?, r.get_ref(7)?],
+    ))
+}
+
 /// The full load: every file's kind and every vector with its derived per-row state.
 fn load_all(conn: &Connection) -> Result<Loaded> {
     let loaded_version = data_version(conn)?;
+    // One read transaction: files and segments come from the same snapshot.
+    let conn = &conn.unchecked_transaction()?;
     let mut file_kind = HashMap::new();
     let mut file_fp = HashMap::new();
     {
-        let mut st = conn.prepare("SELECT id, kind, state, indexed_at, info FROM files")?;
+        let mut st = conn.prepare(FILES_SQL)?;
         let mut rows = st.query([])?;
         while let Some(r) = rows.next()? {
             let id: i64 = r.get(0)?;
@@ -101,7 +112,7 @@ fn load_all(conn: &Connection) -> Result<Loaded> {
             if let Some(k) = FileKind::parse(&kind) {
                 file_kind.insert(id, k);
             }
-            file_fp.insert(id, fingerprint(&kind, r.get_ref(2)?, r.get_ref(3)?, r.get_ref(4)?));
+            file_fp.insert(id, row_fingerprint(r)?);
         }
     }
     let mut vectors = VectorIndex::default();
@@ -413,9 +424,11 @@ impl<'a> Searcher<'a> {
     /// from `info.pages`, loc and kind). Scanning the whole segments table instead would read every vector's page
     /// (45 ms at 100k rows), which is what makes a full load slow.
     ///
-    /// This relies on how the indexer writes (docs/spec-store-search.md): rows are only inserted or deleted, and
-    /// any delete or rewrite of a file's segments also rewrites its `files` row (`finish`, requeue, copy) or deletes
-    /// it. Segment ids are reused after a delete (`INTEGER PRIMARY KEY` without AUTOINCREMENT), so for a rewritten
+    /// FINGERPRINT CONTRACT: this relies on every writer that inserts, deletes or replaces a file's segments or
+    /// vectors also changing that file's `files` row (`state`, `indexed_at`, `info`; path, size and mtime are in
+    /// the fingerprint too) in the same transaction, or deleting the file (`IndexStore`: `add_segments`, `finish`,
+    /// `requeue`, copy, `reset_all`). A writer that does not leaves a refreshed searcher stale until the periodic
+    /// full reload. Segment ids are reused after a delete (`INTEGER PRIMARY KEY` without AUTOINCREMENT), so for a rewritten
     /// file the kept rows' vectors are compared with the stored bytes. `refresh` also reloads fully every
     /// `REFRESH_RELOAD_EVERY` refreshes, so a writer that breaks these assumptions cannot leave a searcher stale for long.
     #[doc(hidden)]
@@ -430,14 +443,14 @@ impl<'a> Searcher<'a> {
         let mut file_kind: HashMap<i64, FileKind> = HashMap::with_capacity(self.file_kind.len());
         let mut file_fp: HashMap<i64, u64> = HashMap::with_capacity(self.file_fp.len());
         {
-            let mut st = tx.prepare("SELECT id, kind, state, indexed_at, info FROM files")?;
+            let mut st = tx.prepare(FILES_SQL)?;
             let mut rows = st.query([])?;
             while let Some(r) = rows.next()? {
                 let kind = r.get_ref(1)?.as_str()?;
                 if let Some(k) = FileKind::parse(kind) {
                     file_kind.insert(r.get(0)?, k);
                 }
-                file_fp.insert(r.get(0)?, fingerprint(kind, r.get_ref(2)?, r.get_ref(3)?, r.get_ref(4)?));
+                file_fp.insert(r.get(0)?, row_fingerprint(r)?);
             }
         }
         trace_stage(trace, "refresh files", t);
@@ -519,9 +532,17 @@ impl<'a> Searcher<'a> {
                         let mut replacement = None;
                         if check {
                             let at = pos * DIM;
-                            if let Some(v) = digup_store::decode_f16(r.get_ref(6)?.as_blob()?) {
-                                if v.iter().zip(&self.vectors.data[at..at + DIM]).any(|(a, b)| a.to_bits() != b.to_bits()) {
-                                    replacement = Some(v);
+                            match digup_store::decode_f16(r.get_ref(6)?.as_blob()?) {
+                                Some(v) => {
+                                    if v.iter().zip(&self.vectors.data[at..at + DIM]).any(|(a, b)| a.to_bits() != b.to_bits()) {
+                                        replacement = Some(v);
+                                    }
+                                }
+                                None => {
+                                    // A fresh load skips an undecodable vector.
+                                    keep[pos] = false;
+                                    removed += 1;
+                                    continue;
                                 }
                             }
                         }

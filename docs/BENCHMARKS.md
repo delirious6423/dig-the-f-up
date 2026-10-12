@@ -220,3 +220,14 @@ faster than the 13 s of R1 phase 5, which ran under memory pressure; 1M numbers 
 made incremental if 0.2 s per commit at 1M turns out to matter. The path relies on the indexer's invariant that any
 delete or rewrite of a file's segments also rewrites or deletes its `files` row (checked in `digup-store/src/index.rs`);
 the 500-refresh full reload bounds the damage if that is ever violated. No estimates in this section.
+
+Caveats added after review:
+- The refresh benchmark measures only inserts of new files with NULL `info` (the best case): no removed rows, no
+  re-evaluated rows, no rewritten files. Removal and rewrite paths are covered for correctness, not timed.
+- Fingerprint contract: every writer that inserts, deletes or replaces a file's segments or vectors must change that
+  file's `files` row (`state`, `indexed_at` or `info`) in the same transaction, or delete the file. It is documented on
+  `Searcher::refresh` and at `IndexStore::add_segments`; `add_segments` now bumps `indexed_at`. The fingerprint also
+  covers path, size and mtime. A writer that breaks the contract leaves the cached searcher stale until the full
+  reload after 500 refreshes (potentially a long time at a slow commit rate).
+- Regression tests: `refresh_id_reuse.rs` (deterministic: the top file deleted, ids reused, rows added elsewhere; it
+  fails with `add_segments` not bumping) and mutation `delete-top` in `refresh_equivalence.rs` (fails if its touch is removed).
