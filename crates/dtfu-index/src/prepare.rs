@@ -47,6 +47,15 @@ pub fn prepare(job: &Job, opts: &IndexOptions, ocr: &dyn Ocr) -> Prepared {
     Prepared { job, result }
 }
 
+/// An error while reading `path`. When the file's parent folder can no longer be stat'ed the volume vanished (drive
+/// unplugged, share offline): `Unavailable`, so the row stays pending. Otherwise the file itself is at fault: `Failed`.
+fn failed_or_unavailable(path: &Path, msg: String) -> Leave {
+    match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() && std::fs::metadata(parent).is_err() => Leave::Unavailable(msg),
+        _ => Leave::Failed(msg),
+    }
+}
+
 /// Whether `path` still has the size and modification time that the crawl recorded.
 fn unchanged_since_crawl(path: &Path, file: &dtfu_store::index::FileRecord) -> bool {
     let Ok(meta) = std::fs::metadata(path) else { return false };
@@ -63,14 +72,14 @@ fn unchanged_since_crawl(path: &Path, file: &dtfu_store::index::FileRecord) -> b
 fn prepare_image(kind: FileKind, path: &Path, ocr: &dyn Ocr) -> Result<Payload, Leave> {
     let p = dtfu_extract_image::process_image(path).map_err(|e| match e {
         ExtractError::Skipped(reason) => Leave::Skipped(reason.to_string()),
-        other => Leave::Failed(other.to_string()),
+        other => failed_or_unavailable(path, other.to_string()),
     })?;
     let fmt = match p.thumbnail.format {
         ThumbFormat::Png => image::ImageFormat::Png,
         _ => image::ImageFormat::Jpeg,
     };
     let rgb_img = image::load_from_memory_with_format(&p.thumbnail.bytes, fmt)
-        .map_err(|e| Leave::Failed(format!("thumbnail decode: {e}")))?
+        .map_err(|e| failed_or_unavailable(path, format!("thumbnail decode: {e}")))?
         .into_rgb8();
     let (w, h) = (rgb_img.width(), rgb_img.height());
     let rgb = rgb_img.into_raw();
@@ -90,7 +99,7 @@ fn prepare_image(kind: FileKind, path: &Path, ocr: &dyn Ocr) -> Result<Payload, 
 fn prepare_doc(job: &Job, opts: &IndexOptions, path: &Path) -> Result<Payload, Leave> {
     let text = docs::extract_text(path).map_err(|e| match e {
         DocError::Unsupported(_) => Leave::Skipped("format not supported".into()),
-        other => Leave::Failed(other.to_string()),
+        other => failed_or_unavailable(path, other.to_string()),
     })?;
     // Counted up to the production cap + 1 (docs::MAX_CHUNKS), which equals Swift's maxChunks + 1 at defaults.
     let total = docs::total_chunks(&text).min(opts.max_chunks + 1);
@@ -110,7 +119,7 @@ fn prepare_doc(job: &Job, opts: &IndexOptions, path: &Path) -> Result<Payload, L
 /// `duration` is 0.0 here: the audio crate only knows the length after the windows were read (`Windows::total_secs`).
 fn prepare_audio(opts: &IndexOptions, path: &Path) -> Result<Payload, Leave> {
     let cfg = WindowConfig { window_secs: opts.audio_window, hop_secs: opts.audio_hop, ..WindowConfig::default() };
-    let stream = AudioStream::open(path).map_err(|e| Leave::Failed(e.to_string()))?;
+    let stream = AudioStream::open(path).map_err(|e| failed_or_unavailable(path, e.to_string()))?;
     let windows = stream.windows_with(cfg).map(|r| r.map_err(anyhow::Error::from));
     Ok(Payload::Audio { duration: 0.0, windows: Box::new(windows) })
 }
@@ -125,7 +134,7 @@ fn prepare_pdf(job: &Job, opts: &IndexOptions, path: &Path, ocr: &dyn Ocr) -> Re
     use dtfu_extract_pdf::{text_problem::page_text_problem, PdfDoc, PdfError};
     let doc = PdfDoc::open(path).map_err(|e| match e {
         PdfError::Locked => Leave::Skipped("password-protected".into()),
-        other => Leave::Failed(other.to_string()),
+        other => failed_or_unavailable(path, other.to_string()),
     })?;
     let total = doc.page_count();
     let wanted = job
@@ -175,7 +184,7 @@ fn prepare_pdf(job: &Job, opts: &IndexOptions, path: &Path, ocr: &dyn Ocr) -> Re
 
 fn prepare_video(opts: &IndexOptions, path: &Path) -> Result<Payload, Leave> {
     use dtfu_extract_video::{frames, probe, VideoError};
-    let info = probe(path).map_err(|e| Leave::Failed(match e {
+    let info = probe(path).map_err(|e| failed_or_unavailable(path, match e {
         VideoError::Missing => "ffmpeg not found".to_string(),
         VideoError::Unreadable(m) => m,
     }))?;
@@ -184,7 +193,7 @@ fn prepare_video(opts: &IndexOptions, path: &Path) -> Result<Payload, Leave> {
         Ok(f) => f,
         Err(_) if info.has_audio => Vec::new(),
         Err(e) => {
-            return Err(Leave::Failed(match e {
+            return Err(failed_or_unavailable(path, match e {
                 VideoError::Missing => "ffmpeg not found".to_string(),
                 VideoError::Unreadable(m) => m,
             }))
@@ -219,7 +228,7 @@ fn prepare_code(opts: &IndexOptions, path: &Path) -> Result<Payload, Leave> {
         max_code_bytes: opts.max_code_bytes,
         max_notebook_bytes: opts.max_notebook_bytes,
     };
-    let f = code::read_file(path, &co).map_err(|e| Leave::Failed(e.to_string()))?;
+    let f = code::read_file(path, &co).map_err(|e| failed_or_unavailable(path, e.to_string()))?;
     match f.outcome {
         CodeOutcome::Skipped(reason) => Err(Leave::Skipped(reason.to_string())),
         CodeOutcome::Stretches(stretches) => {
@@ -417,6 +426,23 @@ mod tests {
         assert!(matches!(prepare(&job(&wav, FileKind::Audio, None), &o, &NoOcr).result, Err(Leave::Failed(_))));
         assert!(matches!(prepare(&job(&missing, FileKind::Code, None), &o, &NoOcr).result, Err(Leave::Failed(_))));
         assert!(matches!(prepare(&job(&missing, FileKind::Pdf, None), &o, &NoOcr).result, Err(Leave::Failed(_))));
+    }
+
+    #[test]
+    fn file_in_a_vanished_folder_is_unavailable_not_failed() {
+        let d = tmp("vanished");
+        let vol = d.join("usb");
+        std::fs::create_dir_all(&vol).unwrap();
+        let p = vol.join("photo.jpg");
+        gradient(600, 400).save(&p).unwrap();
+        let t = vol.join("note.txt");
+        std::fs::write(&t, "A note that lives on the drive.").unwrap();
+        std::fs::remove_dir_all(&vol).unwrap();
+        let o = IndexOptions::default();
+        assert!(matches!(prepare(&job(&p, FileKind::Image, None), &o, &NoOcr).result, Err(Leave::Unavailable(_))));
+        assert!(matches!(prepare(&job(&t, FileKind::Doc, None), &o, &NoOcr).result, Err(Leave::Unavailable(_))));
+        // A missing file whose folder still exists stays failed.
+        assert!(matches!(prepare(&job(&d.join("nope.jpg"), FileKind::Image, None), &o, &NoOcr).result, Err(Leave::Failed(_))));
     }
 
     #[test]

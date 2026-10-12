@@ -68,3 +68,6 @@ progress{width:140px;vertical-align:middle;margin-left:8px}
 .banner span{flex:1;word-break:break-word}
 .banner button{font:inherit;padding:2px 8px}
 #cancelDl{margin-left:6px}
+#folderList em{font-style:normal;font-size:12px;padding:0 6px}
+.warn{color:#b26a00}
+@media (prefers-color-scheme:dark){.warn{color:#f0b35a}}

@@ -6,6 +6,10 @@
 //! Frame times follow `plan_frame_times` (first sample at min(0.5, d/2), then every
 //! max(interval, d/1200) seconds); frames are fetched with `-ss start -vf fps=1/step`, autorotated,
 //! scaled so the longest side is `<= max_side`, then de-duplicated with the 8x8 average hash.
+//!
+//! Every child runs under a deadline (files may live on network shares or USB drives that vanish):
+//! ffprobe has a total deadline; ffmpeg has a no-progress deadline plus a total cap. On a deadline
+//! the child's process group is SIGKILLed and reaped, and the error message starts with "timed out".
 
 use dtfu_extract_image::{
     average_hash_8x8, hamming, plan_frame_times, FRAME_DUPLICATE_BITS,
@@ -13,9 +17,29 @@ use dtfu_extract_image::{
 use image::RgbImage;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Output, Stdio};
+use std::sync::mpsc::{self, RecvTimeoutError};
+use std::thread;
+use std::time::{Duration, Instant};
 
 const MAX_FRAMES: usize = 1200;
+
+#[cfg(not(test))]
+const PROBE_TIMEOUT: Duration = Duration::from_secs(30);
+#[cfg(not(test))]
+const FRAME_NO_PROGRESS_TIMEOUT: Duration = Duration::from_secs(30);
+#[cfg(not(test))]
+const FRAME_TOTAL_TIMEOUT: Duration = Duration::from_secs(600);
+
+#[cfg(test)]
+const PROBE_TIMEOUT: Duration = Duration::from_secs(1);
+#[cfg(test)]
+const FRAME_NO_PROGRESS_TIMEOUT: Duration = Duration::from_secs(1);
+#[cfg(test)]
+const FRAME_TOTAL_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How often the ffprobe wait loop checks the child.
+const POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Frame {
@@ -50,6 +74,56 @@ impl std::fmt::Display for VideoError {
     }
 }
 impl std::error::Error for VideoError {}
+
+/// Child-process plumbing: own process group on unix, so a kill takes the whole tree.
+mod sys {
+    use std::process::Child;
+
+    #[cfg(unix)]
+    mod imp {
+        use std::process::{Child, Command};
+
+        extern "C" {
+            fn kill(pid: i32, sig: i32) -> i32;
+        }
+        const SIGKILL: i32 = 9;
+
+        pub fn configure(cmd: &mut Command) {
+            use std::os::unix::process::CommandExt;
+            cmd.process_group(0);
+        }
+
+        /// SIGKILL the child's process group (the child is its leader), then the child.
+        /// Only call on a child that has not been reaped yet, so the pid cannot be reused.
+        pub fn kill_tree(child: &mut Child) {
+            let pid = child.id() as i32;
+            // SAFETY: plain syscall; a failure (already gone) is ignored.
+            unsafe {
+                kill(-pid, SIGKILL);
+            }
+            let _ = child.kill();
+        }
+    }
+
+    #[cfg(not(unix))]
+    mod imp {
+        use std::process::{Child, Command};
+
+        pub fn configure(_cmd: &mut Command) {}
+
+        pub fn kill_tree(child: &mut Child) {
+            let _ = child.kill();
+        }
+    }
+
+    pub use imp::{configure, kill_tree};
+
+    /// Kill an unreaped child's tree and reap it.
+    pub fn kill_and_reap(child: &mut Child) {
+        kill_tree(child);
+        let _ = child.wait();
+    }
+}
 
 /// File names to try for `name` inside each directory: the bare name, plus `<name>.exe` on Windows.
 fn tool_candidates(name: &str, windows: bool) -> Vec<String> {
@@ -97,14 +171,57 @@ mod find_tool_tests {
     }
 }
 
-pub fn probe(path: &Path) -> Result<VideoInfo, VideoError> {
-    let ffprobe = find_tool("ffprobe").ok_or(VideoError::Missing)?;
-    let out = Command::new(ffprobe)
-        .args(["-v", "error", "-print_format", "json", "-show_format", "-show_streams"])
+/// Read a pipe to EOF on a helper thread so the child can never block on a full pipe.
+fn drain<R: Read + Send + 'static>(pipe: Option<R>) -> thread::JoinHandle<Vec<u8>> {
+    thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(mut r) = pipe {
+            let _ = r.read_to_end(&mut buf);
+        }
+        buf
+    })
+}
+
+/// Run ffprobe to completion, or kill it (process group) once `PROBE_TIMEOUT` has passed.
+fn run_probe(bin: &Path, path: &Path) -> Result<Output, VideoError> {
+    let mut cmd = Command::new(bin);
+    cmd.args(["-v", "error", "-print_format", "json", "-show_format", "-show_streams"])
         .arg(path)
         .stdin(Stdio::null())
-        .output()
-        .map_err(|e| VideoError::Unreadable(e.to_string()))?;
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    sys::configure(&mut cmd);
+    let mut child = cmd.spawn().map_err(|e| VideoError::Unreadable(e.to_string()))?;
+    let out_reader = drain(child.stdout.take());
+    let err_reader = drain(child.stderr.take());
+    let deadline = Instant::now() + PROBE_TIMEOUT;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => thread::sleep(POLL_INTERVAL),
+            Ok(None) => {
+                sys::kill_and_reap(&mut child);
+                return Err(VideoError::Unreadable(format!(
+                    "timed out after {}s waiting for ffprobe",
+                    PROBE_TIMEOUT.as_secs()
+                )));
+            }
+            Err(e) => {
+                sys::kill_and_reap(&mut child);
+                return Err(VideoError::Unreadable(e.to_string()));
+            }
+        }
+    };
+    Ok(Output {
+        status,
+        stdout: out_reader.join().unwrap_or_default(),
+        stderr: err_reader.join().unwrap_or_default(),
+    })
+}
+
+pub fn probe(path: &Path) -> Result<VideoInfo, VideoError> {
+    let ffprobe = find_tool("ffprobe").ok_or(VideoError::Missing)?;
+    let out = run_probe(&ffprobe, path)?;
     if !out.status.success() {
         return Err(VideoError::Unreadable(String::from_utf8_lossy(&out.stderr).trim().to_string()));
     }
@@ -215,6 +332,30 @@ fn collect_kept(r: &mut impl Read, times: &[f64]) -> (Vec<Frame>, usize) {
     (kept, peak)
 }
 
+/// Messages from the ffmpeg output reader thread to the supervising loop.
+enum Event {
+    /// Some bytes arrived on stdout (resets the no-progress deadline).
+    Progress,
+    /// Reader finished: kept frames and peak buffer count.
+    Done(Vec<Frame>, usize),
+}
+
+/// Forwards every successful read as a `Progress` event.
+struct ProgressReader<R> {
+    inner: R,
+    tx: mpsc::Sender<Event>,
+}
+
+impl<R: Read> Read for ProgressReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        if n > 0 {
+            let _ = self.tx.send(Event::Progress);
+        }
+        Ok(n)
+    }
+}
+
 pub fn frames(path: &Path, interval_secs: f64, max_side: u32) -> Result<Vec<Frame>, VideoError> {
     let ffmpeg = find_tool("ffmpeg").ok_or(VideoError::Missing)?;
     let info = probe(path)?;
@@ -231,21 +372,58 @@ pub fn frames(path: &Path, interval_secs: f64, max_side: u32) -> Result<Vec<Fram
         "scale=w='max(1,trunc(iw*min(1,{m}/max(iw,ih))))':h='max(1,trunc(ih*min(1,{m}/max(iw,ih))))':flags=area"
     );
     let vf = format!("fps=1/{step:.9}:round=near:eof_action=pass,{scale}");
-    let mut child = Command::new(ffmpeg)
-        .args(["-v", "error", "-nostdin", "-ss", &format!("{:.6}", times[0]), "-i"])
+    let mut cmd = Command::new(&ffmpeg);
+    cmd.args(["-v", "error", "-nostdin", "-ss", &format!("{:.6}", times[0]), "-i"])
         .arg(path)
         .args(["-an", "-sn", "-vf", &vf, "-frames:v", &times.len().to_string()])
         .args(["-c:v", "ppm", "-f", "image2pipe", "-"])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|e| VideoError::Unreadable(e.to_string()))?;
-    let mut stdout = child.stdout.take().ok_or_else(|| VideoError::Unreadable("no stdout".into()))?;
-    let (kept, _peak) = collect_kept(&mut stdout, &times);
-    drop(stdout);
-    let _ = child.kill();
-    let _ = child.wait();
+        .stderr(Stdio::null());
+    sys::configure(&mut cmd);
+    let mut child: Child = cmd.spawn().map_err(|e| VideoError::Unreadable(e.to_string()))?;
+    let Some(stdout) = child.stdout.take() else {
+        sys::kill_and_reap(&mut child);
+        return Err(VideoError::Unreadable("no stdout".into()));
+    };
+    let (tx, rx) = mpsc::channel::<Event>();
+    let reader_times = times.clone();
+    thread::spawn(move || {
+        let mut progress = ProgressReader { inner: stdout, tx: tx.clone() };
+        let (kept, peak) = collect_kept(&mut progress, &reader_times);
+        let _ = tx.send(Event::Done(kept, peak));
+    });
+
+    let start = Instant::now();
+    let mut kept = Vec::new();
+    let outcome: Result<(), String> = loop {
+        let total_left = FRAME_TOTAL_TIMEOUT.saturating_sub(start.elapsed());
+        if total_left.is_zero() {
+            break Err(format!("timed out after {}s extracting frames", FRAME_TOTAL_TIMEOUT.as_secs()));
+        }
+        match rx.recv_timeout(FRAME_NO_PROGRESS_TIMEOUT.min(total_left)) {
+            Ok(Event::Progress) => {}
+            Ok(Event::Done(k, _peak)) => {
+                kept = k;
+                break Ok(());
+            }
+            Err(RecvTimeoutError::Timeout) => {
+                break Err(if start.elapsed() >= FRAME_TOTAL_TIMEOUT {
+                    format!("timed out after {}s extracting frames", FRAME_TOTAL_TIMEOUT.as_secs())
+                } else {
+                    format!(
+                        "timed out: no frame data from ffmpeg for {}s",
+                        FRAME_NO_PROGRESS_TIMEOUT.as_secs()
+                    )
+                });
+            }
+            // Reader thread ended without a result (panic): treat as no frames.
+            Err(RecvTimeoutError::Disconnected) => break Ok(()),
+        }
+    };
+    // Child is still unreaped here, so its process group cannot have been reused.
+    sys::kill_and_reap(&mut child);
+    outcome.map_err(VideoError::Unreadable)?;
     if kept.is_empty() {
         return Err(VideoError::Unreadable("ffmpeg produced no frames".into()));
     }
@@ -302,5 +480,124 @@ mod tests {
         assert_eq!(kept.len(), 1);
         assert_eq!(kept[0].time_secs, 0.0);
         assert!(peak <= 2, "peak live buffers {peak}");
+    }
+}
+
+/// End-to-end deadline tests through `probe` / `frames`, which locate the tools via PATH.
+/// Fake tools are shell scripts placed first on PATH. All PATH changes live in one test so
+/// they do not race each other.
+#[cfg(all(test, unix))]
+mod deadline_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    extern "C" {
+        fn kill(pid: i32, sig: i32) -> i32;
+    }
+
+    fn alive(pid: i32) -> bool {
+        // SAFETY: signal 0 only probes for existence.
+        unsafe { kill(pid, 0) == 0 }
+    }
+
+    /// Poll until `pid` is gone (a killed grandchild may linger as a zombie briefly).
+    fn gone_soon(pid: i32) -> bool {
+        let until = Instant::now() + Duration::from_secs(3);
+        while alive(pid) {
+            if Instant::now() >= until {
+                return false;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        true
+    }
+
+    /// Writes `dir/name` as an executable `#!/bin/sh` script.
+    fn script(dir: &Path, name: &str, body: &str) {
+        let p = dir.join(name);
+        std::fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    /// Pids written by a hanging fake tool: the shell itself, then a `sleep` grandchild.
+    fn hang_body(pidfile: &Path) -> String {
+        format!("echo $$ > '{0}'; sleep 100 & echo $! >> '{0}'; wait", pidfile.display())
+    }
+
+    fn read_pids(pidfile: &Path) -> Vec<i32> {
+        std::fs::read_to_string(pidfile)
+            .unwrap()
+            .split_whitespace()
+            .map(|s| s.parse().unwrap())
+            .collect()
+    }
+
+    fn with_path_prefix<T>(dir: &Path, f: impl FnOnce() -> T) -> T {
+        let old = std::env::var_os("PATH").unwrap_or_default();
+        let mut new = dir.as_os_str().to_owned();
+        new.push(":");
+        new.push(&old);
+        std::env::set_var("PATH", &new);
+        let out = f();
+        std::env::set_var("PATH", &old);
+        out
+    }
+
+    fn assert_timed_out(err: VideoError) {
+        match err {
+            VideoError::Unreadable(m) => assert!(m.starts_with("timed out"), "message was: {m}"),
+            other => panic!("expected timeout, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fake_tools_through_path() {
+        let started = Instant::now();
+
+        // 1. ffprobe hangs: probe() times out and kills the whole tree.
+        let hang_probe = tempfile::tempdir().unwrap();
+        let pf1 = hang_probe.path().join("pids1");
+        script(hang_probe.path(), "ffprobe", &hang_body(&pf1));
+        let err = with_path_prefix(hang_probe.path(), || probe(Path::new("/nonexistent/x.mp4")));
+        assert_timed_out(err.unwrap_err());
+        for pid in read_pids(&pf1) {
+            assert!(gone_soon(pid), "pid {pid} still alive after ffprobe timeout");
+        }
+
+        // 2. ffprobe answers, ffmpeg hangs without output: frames() times out and kills the tree.
+        let hang_ffmpeg = tempfile::tempdir().unwrap();
+        let pf2 = hang_ffmpeg.path().join("pids2");
+        script(
+            hang_ffmpeg.path(),
+            "ffprobe",
+            "printf '%s' '{\"streams\":[{\"codec_type\":\"video\",\"width\":16,\"height\":16}],\"format\":{\"duration\":\"10\"}}'",
+        );
+        script(hang_ffmpeg.path(), "ffmpeg", &hang_body(&pf2));
+        let err = with_path_prefix(hang_ffmpeg.path(), || frames(Path::new("/nonexistent/x.mp4"), 3.0, 480));
+        assert_timed_out(err.unwrap_err());
+        for pid in read_pids(&pf2) {
+            assert!(gone_soon(pid), "pid {pid} still alive after ffmpeg timeout");
+        }
+
+        // 3. Normal case still works: ffmpeg emits one flat PPM per planned time and exits.
+        let ok_dir = tempfile::tempdir().unwrap();
+        script(
+            ok_dir.path(),
+            "ffprobe",
+            "printf '%s' '{\"streams\":[{\"codec_type\":\"video\",\"width\":16,\"height\":16}],\"format\":{\"duration\":\"10\"}}'",
+        );
+        let n = plan_frame_times(10.0).len();
+        script(
+            ok_dir.path(),
+            "ffmpeg",
+            &format!(
+                "i=0; while [ $i -lt {n} ]; do printf 'P6\\n16 16\\n255\\n'; head -c 768 /dev/zero; i=$((i+1)); done"
+            ),
+        );
+        let got = with_path_prefix(ok_dir.path(), || frames(Path::new("/nonexistent/x.mp4"), 3.0, 480)).unwrap();
+        assert_eq!(got.len(), 1, "flat frames dedup to one");
+        assert_eq!((got[0].width, got[0].height), (16, 16));
+
+        assert!(started.elapsed() < Duration::from_secs(60), "deadlines did not fire promptly");
     }
 }

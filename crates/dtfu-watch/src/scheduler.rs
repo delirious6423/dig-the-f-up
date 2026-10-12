@@ -65,6 +65,12 @@ pub struct WatchConfig {
     pub power_poll: Duration,
     /// Roots indexed as code projects. Paths under these use the code lane and its noise list.
     pub code_roots: Vec<PathBuf>,
+    /// How often root availability is probed (default 10 s).
+    pub availability_interval: Duration,
+    /// Longest a single availability or volume probe may take before the root counts as offline (default 3 s).
+    pub probe_timeout: Duration,
+    /// Forced rescan interval for network roots, which get no events for remote changes (default 15 min).
+    pub network_resync_interval: Duration,
 }
 
 impl Default for WatchConfig {
@@ -78,6 +84,9 @@ impl Default for WatchConfig {
             resync_interval: Duration::from_secs(3600),
             power_poll: Duration::from_secs(30),
             code_roots: Vec::new(),
+            availability_interval: Duration::from_secs(10),
+            probe_timeout: Duration::from_secs(3),
+            network_resync_interval: Duration::from_secs(900),
         }
     }
 }
@@ -159,6 +168,15 @@ impl Scheduler {
     pub fn on_path(&mut self, path: &Path, now: Duration) {
         if let Some(lane) = classify(path, &self.roots, &self.cfg.code_roots) {
             self.coalescer.record(path.to_path_buf(), lane, now);
+        }
+    }
+
+    /// Swaps a root's path (for example given path -> canonical path once an offline root appears).
+    pub fn replace_root(&mut self, old: &Path, new: &Path) {
+        for r in self.roots.iter_mut().chain(self.cfg.code_roots.iter_mut()) {
+            if r == old {
+                *r = new.to_path_buf();
+            }
         }
     }
 

@@ -53,6 +53,64 @@ pub fn open(path: &Path) -> Result<Connection> {
     Ok(c)
 }
 
+fn is_corruption(e: &anyhow::Error) -> bool {
+    matches!(
+        e.downcast_ref::<rusqlite::Error>(),
+        Some(rusqlite::Error::SqliteFailure(f, _))
+            if matches!(f.code, rusqlite::ErrorCode::DatabaseCorrupt | rusqlite::ErrorCode::NotADatabase)
+    )
+}
+
+/// `PRAGMA quick_check(1)` on a fresh connection; true when it reports anything but "ok". Only run after an open error.
+fn quick_check_fails(path: &Path) -> bool {
+    let Ok(c) = Connection::open(path) else { return false };
+    match c.query_row("PRAGMA quick_check(1)", [], |r| r.get::<_, String>(0)) {
+        Ok(s) => s != "ok",
+        Err(rusqlite::Error::SqliteFailure(f, _)) => {
+            matches!(f.code, rusqlite::ErrorCode::DatabaseCorrupt | rusqlite::ErrorCode::NotADatabase)
+        }
+        Err(_) => false,
+    }
+}
+
+/// Like [`open`], but when opening fails because the file is damaged, moves the database and its `-wal`/`-shm` to
+/// `<name>.corrupt-<unix secs>` (never deleted) and creates a fresh one. The flag is true when that happened.
+pub fn open_recovering(path: &Path) -> Result<(Connection, bool)> {
+    let err = match open(path) {
+        Ok(c) => return Ok((c, false)),
+        Err(e) => e,
+    };
+    if !path.exists() || !(is_corruption(&err) || quick_check_fails(path)) {
+        return Err(err);
+    }
+    let mut secs =
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let base = path.to_string_lossy().into_owned();
+    // Never overwrite an earlier copy (two recoveries within a second).
+    while std::path::Path::new(&format!("{base}.corrupt-{secs}")).exists() {
+        secs += 1;
+    }
+    // The -wal and -shm go first and the database last: a fresh database must never start next to the old WAL. If
+    // any move fails, the ones already done are undone and the error is returned (nothing is opened).
+    let mut moved: Vec<(std::path::PathBuf, std::path::PathBuf)> = Vec::new();
+    for suffix in ["-wal", "-shm", ""] {
+        let from = std::path::PathBuf::from(format!("{base}{suffix}"));
+        if !from.exists() {
+            continue;
+        }
+        let to = std::path::PathBuf::from(format!("{base}.corrupt-{secs}{suffix}"));
+        if let Err(e) = std::fs::rename(&from, &to) {
+            for (f, t) in moved.iter().rev() {
+                let _ = std::fs::rename(t, f);
+            }
+            return Err(anyhow::anyhow!("moving damaged index {}: {e}", from.display()));
+        }
+        moved.push((from, to));
+    }
+    eprintln!("warning: index {} was damaged ({err:#}); moved to {base}.corrupt-{secs} and starting a fresh one", path.display());
+    Ok((open(path)?, true))
+}
+
 pub fn open_in_memory() -> Result<Connection> {
     let c = Connection::open_in_memory()?;
     configure(&c)?;

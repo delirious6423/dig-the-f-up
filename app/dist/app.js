@@ -124,11 +124,20 @@
 
   // Folders panel
   async function loadFolders() {
-    const fs = await invoke("folders");
+    let fs;
+    try { fs = await invoke("folder_states"); } catch (e) { fs = (await invoke("folders")).map((path) => ({ path, state: "unknown" })); }
+    const note = {
+      offline: '<em class="dim" title="The drive is unplugged or the share is not answering. Its files stay searchable and are checked again when it is back.">offline</em>',
+      different_drive: '<em class="warn" title="A different drive is mounted here. Its files are not indexed until you choose to use it.">different drive</em> <button data-use="1">Use this drive</button>',
+    };
     $("folderList").innerHTML = fs.map((f, i) =>
-      `<li><span>${esc(f)}</span><button data-i="${i}">Remove</button></li>`).join("") || '<li class="dim">No folders yet.</li>';
+      `<li data-i="${i}"><span>${esc(f.path)}</span> ${note[f.state] || ""}<button data-rm="1">Remove</button></li>`).join("") || '<li class="dim">No folders yet.</li>';
     $("folderList").querySelectorAll("button").forEach((b) => b.addEventListener("click", async () => {
-      try { await invoke("remove_folder", { path: fs[+b.dataset.i] }); } catch (e) { showError(e); }
+      const path = fs[+b.closest("li").dataset.i].path;
+      try {
+        if (b.dataset.use) await invoke("use_drive_now", { path });
+        else await invoke("remove_folder", { path });
+      } catch (e) { showError(e); }
       loadFolders(); refreshStatus();
     }));
   }
@@ -310,6 +319,7 @@
     else if (p.type === "idle" || p.type === "stopped") { status = { state: "idle" }; if (p.type === "stopped") setTimeout(refreshStatus, 100); }
     else if (p.type === "error") { $("statusText").textContent = "Error: " + p.message; return; }
     renderStatus();
+    if (p.type === "synced" && !$("folders").hidden) loadFolders();
     if (p.type === "idle" || p.type === "synced") { clearTimeout(evTimer); evTimer = setTimeout(refreshStatus, 300); }
   });
 

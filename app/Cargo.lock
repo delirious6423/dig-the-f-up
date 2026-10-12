@@ -1146,6 +1146,7 @@ dependencies = [
  "libc",
  "rayon",
  "regex",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -1335,6 +1336,7 @@ name = "dtfu-watch"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "dtfu-crawl",
  "notify",
 ]
 

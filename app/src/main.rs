@@ -22,6 +22,31 @@ fn err<E: std::fmt::Display>(e: E) -> String {
     format!("{e:#}")
 }
 
+/// How long a filesystem call may take before we give up (SMB shares and dead drives can block for minutes).
+const FS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Runs blocking filesystem work off the async workers with a deadline of `FS_TIMEOUT`.
+/// On timeout the blocking thread is abandoned: a hung syscall cannot be cancelled, so it keeps running until the OS
+/// returns and its result is dropped. Pass only owned data into `f`.
+async fn fs_call<T: Send + 'static>(what: &str, f: impl FnOnce() -> Result<T, String> + Send + 'static) -> Result<T, String> {
+    fs_call_within(FS_TIMEOUT, what, f).await
+}
+
+/// Handing a file to another app (open, reveal) can take seconds while that app starts; the path itself was already
+/// checked within `FS_TIMEOUT`, so the handoff gets this longer deadline.
+const HANDOFF_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+
+async fn fs_call_within<T: Send + 'static>(
+    limit: std::time::Duration,
+    what: &str,
+    f: impl FnOnce() -> Result<T, String> + Send + 'static,
+) -> Result<T, String> {
+    match tokio::time::timeout(limit, tokio::task::spawn_blocking(f)).await {
+        Ok(joined) => joined.map_err(err)?,
+        Err(_) => Err(format!("{what}: the drive or network share is not responding")),
+    }
+}
+
 #[derive(Serialize, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
 struct HitDto {
@@ -122,8 +147,9 @@ fn event_json(ev: EngineEvent) -> serde_json::Value {
     use serde_json::json;
     match ev {
         EngineEvent::Pruned { removed } => json!({"type":"pruned","removed":removed}),
-        EngineEvent::Synced { added, changed, moved, removed, unchanged } => {
-            json!({"type":"synced","added":added,"changed":changed,"moved":moved,"removed":removed,"unchanged":unchanged})
+        EngineEvent::Synced { added, changed, moved, removed, unchanged, offline, different_drive } => {
+            json!({"type":"synced","added":added,"changed":changed,"moved":moved,"removed":removed,"unchanged":unchanged,
+                   "offline":offline,"different_drive":different_drive})
         }
         EngineEvent::Progress { done, total, path, kind, state, note } => {
             json!({"type":"progress","done":done,"total":total,"path":path,"kind":kind,"state":state,"note":note})
@@ -196,9 +222,31 @@ async fn folders(engine: Eng<'_>) -> Res<Vec<String>> {
     Ok(engine.folders().iter().map(|p| p.to_string_lossy().into_owned()).collect())
 }
 
+/// Each folder with its drive state: "online", "offline", "different_drive" or "unknown" (see `Engine::folder_states`).
+#[tauri::command]
+async fn folder_states(engine: Eng<'_>) -> Res<Vec<serde_json::Value>> {
+    Ok(engine
+        .folder_states()
+        .into_iter()
+        .map(|(p, state)| serde_json::json!({"path": p.to_string_lossy(), "state": state}))
+        .collect())
+}
+
+/// Index the drive now mounted at `path` in place of the one the folder was indexed on.
+#[tauri::command]
+async fn use_drive_now(engine: Eng<'_>, path: String) -> Res<()> {
+    let p = std::path::PathBuf::from(&path);
+    if !engine.folders().contains(&p) {
+        return Err("not one of your folders".into());
+    }
+    let e = engine.inner().clone();
+    tokio::task::spawn_blocking(move || e.use_drive_now(&p)).await.map_err(err)?.map_err(err)
+}
+
 #[tauri::command]
 async fn add_folder(engine: Eng<'_>, path: String) -> Res<()> {
-    if !std::path::Path::new(&path).is_dir() {
+    let probe = path.clone();
+    if !fs_call("add folder", move || Ok(std::path::Path::new(&probe).is_dir())).await? {
         return Err("not a directory".into());
     }
     let engine = Arc::clone(engine.inner());
@@ -218,9 +266,17 @@ fn existing_dirs(candidates: &[PathBuf]) -> Vec<String> {
 
 /// First-run suggestions: the common user folders under home that exist.
 #[tauri::command]
-fn suggested_folders() -> Vec<String> {
+async fn suggested_folders() -> Vec<String> {
     let Some(home) = dirs::home_dir() else { return Vec::new() };
-    existing_dirs(&["Documents", "Desktop", "Pictures", "Downloads"].map(|d| home.join(d)))
+    let mut out = Vec::new();
+    for d in ["Documents", "Desktop", "Pictures", "Downloads"] {
+        let p = home.join(d);
+        // On timeout (or error) the folder is skipped.
+        if let Ok(v) = fs_call("suggested folder", move || Ok(existing_dirs(&[p]))).await {
+            out.extend(v);
+        }
+    }
+    out
 }
 
 #[tauri::command]
@@ -327,23 +383,30 @@ fn cancel_download() {
 }
 
 /// Only existing files under an indexed folder may be opened or revealed.
-fn checked_path(engine: &Engine, path: &str) -> Res<PathBuf> {
-    let p = std::fs::canonicalize(path).map_err(err)?;
-    if !p.is_file() {
-        return Err("not a file".into());
-    }
-    let under = engine.folders().iter().any(|f| std::fs::canonicalize(f).map(|f| p.starts_with(f)).unwrap_or(false));
-    if under { Ok(p) } else { Err("path is outside the indexed folders".into()) }
+async fn checked_path(engine: &Engine, path: &str) -> Res<PathBuf> {
+    let folders = engine.folders();
+    let path = path.to_string();
+    fs_call("check path", move || {
+        let p = std::fs::canonicalize(&path).map_err(err)?;
+        if !p.is_file() {
+            return Err("not a file".into());
+        }
+        let under = folders.iter().any(|f| std::fs::canonicalize(f).map(|f| p.starts_with(f)).unwrap_or(false));
+        if under { Ok(p) } else { Err("path is outside the indexed folders".into()) }
+    })
+    .await
 }
 
 /// Only files the index contains may be opened or revealed: folder check first, then an exact path lookup.
 /// The stored path is what the UI passes; the canonical form is tried too (symlinked folders).
 async fn checked_indexed(engine: &Eng<'_>, path: &str) -> Res<PathBuf> {
-    let p = checked_path(engine, path)?;
+    let p = checked_path(engine, path).await?;
     let candidates = indexed_candidates(path, &p);
     // What gets opened is the canonical `p`. If the file itself is a symlink (say an indexed entry later replaced by
     // a link), its target must be indexed too; symlinked parent folders stay allowed.
-    let file_is_link = std::fs::symlink_metadata(path).map(|m| m.file_type().is_symlink()).unwrap_or(false);
+    let owned = path.to_string();
+    let file_is_link =
+        fs_call("check path", move || Ok(std::fs::symlink_metadata(&owned).map(|m| m.file_type().is_symlink()).unwrap_or(false))).await?;
     let eng = engine.inner().clone();
     let found = tauri::async_runtime::spawn_blocking(move || -> Res<bool> {
         if file_is_link {
@@ -382,13 +445,14 @@ async fn open_hit(app: AppHandle, engine: Eng<'_>, path: String, kind: String, l
     // Feeds ranking and indexing order when the user turned open-history on; a no-op otherwise. Never blocks the open.
     let _ = engine.record_open(&path);
     let handle = app.clone();
-    tauri::async_runtime::spawn_blocking(move || opener::open_at(&handle, &p, &kind, loc, &query)).await.map_err(err)?
+    fs_call_within(HANDOFF_TIMEOUT, "open file", move || opener::open_at(&handle, &p, &kind, loc, &query)).await
 }
 
 #[tauri::command]
 async fn reveal_path(app: AppHandle, engine: Eng<'_>, path: String) -> Res<()> {
     let p = checked_indexed(&engine, &path).await?;
-    app.opener().reveal_item_in_dir(p).map_err(err)
+    let handle = app.clone();
+    fs_call_within(HANDOFF_TIMEOUT, "reveal file", move || handle.opener().reveal_item_in_dir(p).map_err(err)).await
 }
 
 const THUMB_SIDE: u32 = 96;
@@ -448,11 +512,18 @@ async fn thumbnail(engine: Eng<'_>, path: String) -> Res<Option<String>> {
     if !thumb_ext_supported(std::path::Path::new(&path)) {
         return Ok(None);
     }
-    let p = checked_path(&engine, &path)?;
+    let p = checked_path(&engine, &path).await?;
     // At most THUMB_CONCURRENCY decodes at once; a scrolling result list must not spawn dozens of full decodes.
+    // The permit stays with this future; the blocking closure only owns data, so a hung read cannot leak it.
     let _permit = thumb_semaphore().acquire().await.map_err(err)?;
-    tauri::async_runtime::spawn_blocking(move || thumb_file(&p)).await.map_err(err)?
+    match tokio::time::timeout(THUMB_TIMEOUT, tokio::task::spawn_blocking(move || thumb_file(&p))).await {
+        Ok(joined) => joined.map_err(err)?,
+        // The abandoned blocking thread finishes on its own when the read returns.
+        Err(_) => Err("thumbnail: the drive or network share is not responding".into()),
+    }
 }
+
+const THUMB_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 const THUMB_CONCURRENCY: usize = 3;
 
@@ -575,7 +646,7 @@ fn main() {
             }
         })
         .invoke_handler(tauri::generate_handler![
-            search, status, counts, live, set_watch, set_usage_tracking, clear_usage, folders, add_folder, remove_folder, suggested_folders, pick_folder, start_indexing,
+            search, status, counts, live, set_watch, set_usage_tracking, clear_usage, folders, folder_states, use_drive_now, add_folder, remove_folder, suggested_folders, pick_folder, start_indexing,
             pause, resume, model_present, model_info, download_models, cancel_download, open_hit, reveal_path, quit, thumbnail
         ])
         .build(tauri::generate_context!())
@@ -597,6 +668,21 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fs_call_times_out_on_a_hung_closure() {
+        let rt = tokio::runtime::Builder::new_multi_thread().enable_time().build().unwrap();
+        let t = std::time::Instant::now();
+        let r: Res<()> = rt.block_on(fs_call("stat", || {
+            std::thread::sleep(std::time::Duration::from_secs(5));
+            Ok(())
+        }));
+        assert_eq!(r.unwrap_err(), "stat: the drive or network share is not responding");
+        assert!(t.elapsed() < std::time::Duration::from_secs(4));
+        let ok: Res<u8> = rt.block_on(fs_call("stat", || Ok(7)));
+        assert_eq!(ok, Ok(7));
+        rt.shutdown_background();
+    }
 
     #[test]
     fn indexed_candidates_adds_canonical_only_when_different() {

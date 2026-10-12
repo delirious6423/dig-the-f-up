@@ -103,6 +103,7 @@ pub struct IndexStore {
     conn: Connection,
     file: PathBuf,
     scope: Option<Vec<String>>,
+    recovered: bool,
 }
 
 impl IndexStore {
@@ -112,8 +113,13 @@ impl IndexStore {
         std::fs::create_dir_all(directory)
             .with_context(|| format!("creating index folder {}", directory.display()))?;
         let file = directory.join(file_name);
-        let conn = crate::open(&file)?;
-        Ok(Self { conn, file, scope: None })
+        let (conn, recovered) = crate::open_recovering(&file)?;
+        Ok(Self { conn, file, scope: None, recovered })
+    }
+
+    /// True when `open` found the database damaged, moved it aside (`<name>.corrupt-<secs>`) and made a fresh one.
+    pub fn recovered_from_corruption(&self) -> bool {
+        self.recovered
     }
 
     /// Gives up the store for its connection (a cached `Searcher` owns one).
@@ -744,6 +750,27 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn corrupt_index_is_moved_aside_and_rebuilt() {
+        let dir = TempDir::new();
+        let db = dir.0.join(MAIN_FILE);
+        assert!(!store(&dir).recovered_from_corruption());
+        assert!(!store(&dir).recovered_from_corruption());
+        std::fs::write(&db, vec![0xABu8; 8192]).unwrap();
+        let s = store(&dir);
+        assert!(s.recovered_from_corruption());
+        assert!(s.connection().query_row("SELECT count(*) FROM files", [], |r| r.get::<_, i64>(0)).unwrap() == 0);
+        let kept: Vec<_> = std::fs::read_dir(&dir.0)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains(".corrupt-"))
+            .collect();
+        assert_eq!(kept.len(), 1);
+        assert_eq!(std::fs::read(kept[0].path()).unwrap(), vec![0xABu8; 8192]);
+        drop(s);
+        assert!(!store(&dir).recovered_from_corruption());
     }
 
     fn store(dir: &TempDir) -> IndexStore {

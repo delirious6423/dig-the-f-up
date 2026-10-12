@@ -53,11 +53,15 @@ pub struct Job {
     pub content_hash: Option<String>,
 }
 
-/// Why a file was not indexed. `Skipped` is normal (too small, no text); `Failed` is an error.
+/// Why a file was not indexed. `Skipped` is normal (too small, no text); `Failed` is an error, permanent until the
+/// file changes. `Unavailable` means the file's folder is gone or unreadable (drive unplugged or share offline): the
+/// row stays `pending` so the file is retried when the drive comes back.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Leave {
     Skipped(String),
     Failed(String),
+    /// The file's folder is gone or unreadable: drive unplugged or share offline.
+    Unavailable(String),
 }
 
 /// What prepare extracted from a file, ready to embed. No embedding happens before commit.

@@ -52,6 +52,8 @@ pub fn commit(
     let id = prepared.job.file.id;
     let outcome = match prepared.result {
         Err(Leave::Skipped(why)) => skipped(&why),
+        // The folder is gone or unreadable: write nothing, so the row stays pending and is retried later.
+        Err(Leave::Unavailable(_)) => return Ok(()),
         Err(Leave::Failed(e)) => {
             Outcome { segments: Vec::new(), state: FileState::Failed, detail: Some(e), info: BTreeMap::new() }
         }
@@ -637,5 +639,22 @@ mod tests {
         assert_eq!(state(&store, rec.id), ("skipped".into(), Some("too small".into())));
         commit(&mut store, &mut fake, prepared(&rec, Err(Leave::Failed("boom".into()))), &opts).unwrap();
         assert_eq!(state(&store, rec.id), ("failed".into(), Some("boom".into())));
+    }
+
+    #[test]
+    fn unavailable_leaves_the_row_pending_and_writes_nothing() {
+        let (mut store, rec) = setup(FileKind::Doc);
+        let mut fake = FakeEmbedder::default();
+        let before = state(&store, rec.id);
+        commit(
+            &mut store,
+            &mut fake,
+            prepared(&rec, Err(Leave::Unavailable("folder gone".into()))),
+            &IndexOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(state(&store, rec.id), before);
+        assert_eq!(state(&store, rec.id).0, "pending");
+        assert!(rows(&store).is_empty());
     }
 }

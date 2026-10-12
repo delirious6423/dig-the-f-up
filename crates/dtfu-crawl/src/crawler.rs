@@ -86,6 +86,9 @@ pub struct CrawlReport {
     pub skipped: HashMap<String, usize>,
     pub skipped_folders: HashMap<String, usize>,
     pub datasets: HashMap<String, usize>,
+    /// Folders whose listing failed (read_dir error, or an entry error while iterating), as `/`-separated
+    /// paths, sorted and deduplicated. Their contents were NOT scanned, so an empty result there is not proof of absence.
+    pub unreadable_dirs: Vec<String>,
 }
 
 #[derive(Default)]
@@ -94,11 +97,13 @@ struct Partial {
     skipped: HashMap<String, usize>,
     skipped_folders: HashMap<String, usize>,
     project_roots: Vec<String>,
+    unreadable_dirs: Vec<String>,
 }
 
 impl Partial {
     fn merge(&mut self, o: Partial) {
         self.found.extend(o.found);
+        self.unreadable_dirs.extend(o.unreadable_dirs);
         for (k, v) in o.skipped {
             *self.skipped.entry(k).or_default() += v;
         }
@@ -195,7 +200,14 @@ fn crawl_inner(roots: &[String], options: &CrawlOptions) -> CrawlReport {
         memo.insert(folder.to_string(), answer);
         answer
     }
-    let mut report = CrawlReport { skipped: total.skipped, skipped_folders: total.skipped_folders, ..Default::default() };
+    total.unreadable_dirs.sort();
+    total.unreadable_dirs.dedup();
+    let mut report = CrawlReport {
+        skipped: total.skipped,
+        skipped_folders: total.skipped_folders,
+        unreadable_dirs: total.unreadable_dirs,
+        ..Default::default()
+    };
     let mut kept = Vec::with_capacity(total.found.len());
     for file in total.found {
         if !options.code
@@ -246,12 +258,21 @@ fn walk_dir<'s>(ctx: &'s Ctx<'s>, dir: &Path, scope: &rayon::Scope<'s>, sink: &'
     let mut local = Partial::default();
     let rd = match std::fs::read_dir(dir) {
         Ok(rd) => rd,
-        Err(_) => return, // errorHandler { true }: ignore
+        Err(_) => {
+            // errorHandler { true }: ignore and continue (Swift parity), but record that this folder was not scanned.
+            local.unreadable_dirs.push(path_string(dir));
+            sink.lock().unwrap().merge(local);
+            return;
+        }
     };
-    let entries: Vec<(String, PathBuf, Option<std::fs::FileType>)> = rd
-        .flatten()
-        .map(|e| (e.file_name().to_string_lossy().into_owned(), e.path(), e.file_type().ok()))
-        .collect();
+    let mut entries: Vec<(String, PathBuf, Option<std::fs::FileType>)> = Vec::new();
+    for e in rd {
+        match e {
+            Ok(e) => entries.push((e.file_name().to_string_lossy().into_owned(), e.path(), e.file_type().ok())),
+            // An entry that cannot be read means the listing is incomplete.
+            Err(_) => local.unreadable_dirs.push(path_string(dir)),
+        }
+    }
 
     // Crawler.swift:56-67: this folder was entered; is it a code project? (same listing, no second readdir)
     if !ctx.opts.code && rules::is_project_listing(entries.iter().map(|e| e.0.as_str())) {

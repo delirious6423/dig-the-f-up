@@ -8,6 +8,7 @@ rust-version.workspace = true
 [dependencies]
 anyhow.workspace = true
 notify = "6"
+dtfu-crawl = { path = "../dtfu-crawl" }
 
 [dev-dependencies]
 tempfile.workspace = true

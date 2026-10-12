@@ -4,6 +4,7 @@
 use anyhow::{anyhow, bail, Context, Result};
 use dtfu_core::{query_prompt, FileKind, SegmentKind};
 use dtfu_index::service::{Control, NotReady, Part, Service, ServiceEvent};
+use dtfu_index::sync::{forget_volume, RootState};
 use dtfu_index::{Embed, IndexOptions, SystemOcr};
 use dtfu_search::searcher::OwnedSearcher;
 use dtfu_search::filters;
@@ -60,7 +61,17 @@ pub struct IndexCounts {
 #[derive(Debug, Clone, PartialEq)]
 pub enum EngineEvent {
     Pruned { removed: usize },
-    Synced { added: usize, changed: usize, moved: usize, removed: usize, unchanged: usize },
+    /// `offline`: folders skipped because their drive is unplugged or not answering (their files stay searchable).
+    /// `different_drive`: folders where another drive is mounted in place of theirs (see `Engine::use_drive_now`).
+    Synced {
+        added: usize,
+        changed: usize,
+        moved: usize,
+        removed: usize,
+        unchanged: usize,
+        offline: Vec<String>,
+        different_drive: Vec<String>,
+    },
     Progress { done: usize, total: usize, path: String, kind: String, state: String, note: Option<String> },
     /// A step of a long file in the later pass.
     Rest { done: usize, total: usize, path: String, kind: String, state: String, note: Option<String> },
@@ -187,6 +198,8 @@ struct Inner {
     paused: AtomicBool,
     wanted: AtomicBool,
     backfill: AtomicBool,
+    /// Each folder's state from the last main-index sync, keyed by the folder as the sync saw it.
+    folder_states: Mutex<HashMap<String, RootState>>,
 }
 
 pub struct Engine {
@@ -240,22 +253,30 @@ impl Inner {
         if let Some(parent) = self.cfg.settings_file.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let tmp = self.cfg.settings_file.with_extension("tmp");
-        std::fs::write(&tmp, serde_json::to_vec_pretty(s)?)?;
-        std::fs::rename(&tmp, &self.cfg.settings_file)?;
+        dtfu_models::write_atomic(&self.cfg.settings_file, &serde_json::to_vec_pretty(s)?)?;
         Ok(())
     }
 
     fn handle(&self, ev: ServiceEvent) {
         let ee = match ev {
             ServiceEvent::Pruned { removed, .. } => EngineEvent::Pruned { removed },
-            ServiceEvent::Sync { summary, .. } => EngineEvent::Synced {
-                added: summary.added,
-                changed: summary.changed,
-                moved: summary.moved,
-                removed: summary.removed,
-                unchanged: summary.unchanged,
-            },
+            ServiceEvent::Sync { summary, code } => {
+                let pick = |want: RootState| -> Vec<String> {
+                    summary.roots.iter().filter(|r| r.state == want).map(|r| r.root.clone()).collect()
+                };
+                if !code {
+                    *lock(&self.folder_states) = summary.roots.iter().map(|r| (r.root.clone(), r.state)).collect();
+                }
+                EngineEvent::Synced {
+                    added: summary.added,
+                    changed: summary.changed,
+                    moved: summary.moved,
+                    removed: summary.removed,
+                    unchanged: summary.unchanged,
+                    offline: pick(RootState::Offline),
+                    different_drive: pick(RootState::DifferentDrive),
+                }
+            }
             ServiceEvent::Progress(e) | ServiceEvent::Rest(e) => {
                 *lock(&self.status) = Status::Indexing { done: e.done, total: e.total, current: e.path.clone() };
                 EngineEvent::Progress {
@@ -489,6 +510,7 @@ impl Engine {
                 paused: AtomicBool::new(false),
                 wanted: AtomicBool::new(false),
                 backfill: AtomicBool::new(true),
+                folder_states: Mutex::new(HashMap::new()),
             }),
         })
     }
@@ -654,6 +676,41 @@ impl Engine {
                 deferred: w.deferred_reason().map(|r| r.to_string()),
             },
         }
+    }
+
+    /// Each folder with its state from the last sync: "online", "offline" (drive unplugged or not answering; its files
+    /// stay searchable), "different_drive" (another drive is mounted in its place), or "unknown" (not synced yet).
+    pub fn folder_states(&self) -> Vec<(PathBuf, &'static str)> {
+        let states = lock(&self.inner.folder_states);
+        self.folders()
+            .into_iter()
+            .map(|f| {
+                // Same key as the sync's: the folder as text without a trailing '/' (except "/" itself).
+                let text = f.to_string_lossy();
+                let key = if text.len() > 1 { text.trim_end_matches('/') } else { &text };
+                let state = match states.get(key) {
+                    Some(RootState::Online) => "online",
+                    Some(RootState::Offline) => "offline",
+                    Some(RootState::DifferentDrive) => "different_drive",
+                    None => "unknown",
+                };
+                (f, state)
+            })
+            .collect()
+    }
+
+    /// Accepts the drive now mounted at `folder` in place of the one it was indexed on: the next sync indexes it and
+    /// removes the files the old drive had that this one doesn't. Blocking (opens the stores).
+    pub fn use_drive_now(&self, folder: &Path) -> Result<()> {
+        for file in [MAIN_FILE, CODE_FILE] {
+            if self.inner.cfg.index_dir.join(file).exists() {
+                forget_volume(&IndexStore::open(&self.inner.cfg.index_dir, file)?, folder)?;
+            }
+        }
+        if self.inner.wanted.load(Ordering::SeqCst) && !self.inner.paused.load(Ordering::SeqCst) {
+            self.inner.spawn()?;
+        }
+        Ok(())
     }
 
     /// True when `path` is exactly a file of the main or code index. Blocking (opens the stores).

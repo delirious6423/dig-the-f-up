@@ -5,6 +5,7 @@ pub mod crawler;
 pub mod folder_selection;
 pub mod rules;
 pub mod types;
+pub mod volume;
 
 pub use crawler::{crawl, Candidate, CrawlOptions, CrawlReport};
 pub use folder_selection::{FolderSelection, Mark};

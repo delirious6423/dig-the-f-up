@@ -4,7 +4,7 @@
 use crate::commit::commit;
 use crate::options::IndexOptions;
 use crate::prepare::prepare;
-use crate::types::{Embed, Job, Ocr, Prepared};
+use crate::types::{Embed, Job, Leave, Ocr, Prepared};
 use anyhow::Result;
 use crate::commit::CONTENT_HASH;
 use crate::commit::CONTENT_SIZE;
@@ -12,8 +12,9 @@ use dtfu_store::index::{Adoption, FileRecord, IndexStore, Mismatch};
 use rayon::prelude::*;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
-use std::sync::mpsc::sync_channel;
-use std::time::{Instant, UNIX_EPOCH};
+use std::sync::mpsc::{sync_channel, RecvTimeoutError};
+use std::sync::{Arc, Mutex, RwLock};
+use std::time::{Duration, Instant, UNIX_EPOCH};
 
 /// Mtime tolerance used by sync (sync.rs `MTIME_TOLERANCE`).
 const MTIME_TOLERANCE: f64 = 0.001;
@@ -292,6 +293,172 @@ fn merge_states(into: &mut BTreeMap<String, usize>, from: BTreeMap<String, usize
     }
 }
 
+/// How long one file may spend in prepare. A share that stops answering blocks reads for minutes or forever and threads
+/// cannot be cancelled, so a file that exceeds this is left pending (`Unavailable`) and its helper thread abandoned.
+pub const PREPARE_DEADLINE: Duration = Duration::from_secs(120);
+/// Abandoned (still blocked) helper threads allowed at once; at this many the run stops preparing new files.
+const MAX_LEAKED: usize = 4;
+
+/// The part of the path that names the drive or share: the first two normal components ("/Volumes/X").
+fn volume_key(path: &str) -> String {
+    #[cfg(test)]
+    if let Some(at) = path.find("/vol-") {
+        let end = path[at + 1..].find('/').map_or(path.len(), |i| at + 1 + i);
+        return path[..end].to_string();
+    }
+    let parent = Path::new(path).parent().unwrap_or(Path::new(""));
+    let mut key = std::path::PathBuf::new();
+    let mut normal = 0;
+    for c in parent.components() {
+        if matches!(c, std::path::Component::Normal(_)) {
+            if normal == 2 {
+                break;
+            }
+            normal += 1;
+        }
+        key.push(c.as_os_str());
+    }
+    key.to_string_lossy().into_owned()
+}
+
+/// Lends the borrowed `Ocr` to helper threads that may outlive the run. Once the run is over `alive` is false and the
+/// pointer is never touched again (the write lock waits for calls in flight).
+struct OcrGate {
+    ocr: &'static dyn Ocr,
+    alive: RwLock<bool>,
+}
+impl Ocr for OcrGate {
+    fn recognize(&self, width: usize, height: usize, rgb: &[u8]) -> Option<String> {
+        let alive = self.alive.read().ok()?;
+        if *alive {
+            self.ocr.recognize(width, height, rgb)
+        } else {
+            None
+        }
+    }
+}
+struct CloseGate(Arc<OcrGate>);
+impl Drop for CloseGate {
+    fn drop(&mut self) {
+        *self.0.alive.write().unwrap_or_else(|e| e.into_inner()) = false;
+    }
+}
+
+/// Process-wide registry of in-flight helper threads. It outlives any one `process()` call because abandoned helpers do.
+#[derive(Default)]
+struct Registry {
+    next: u64,
+    /// Helper id -> (volume key, past its deadline and still not returned).
+    helpers: HashMap<u64, (String, bool)>,
+}
+static REGISTRY: Mutex<Option<Registry>> = Mutex::new(None);
+
+fn with_registry<R>(f: impl FnOnce(&mut Registry) -> R) -> R {
+    let mut guard = REGISTRY.lock().unwrap_or_else(|e| e.into_inner());
+    f(guard.get_or_insert_with(Registry::default))
+}
+
+/// Owned by a helper thread; dropping it (also when the helper panics) removes the helper from the registry.
+struct Permit(u64);
+impl Drop for Permit {
+    fn drop(&mut self) {
+        let id = self.0;
+        with_registry(|r| {
+            r.helpers.remove(&id);
+        });
+    }
+}
+
+/// Admits a helper for `key` unless a hung helper already holds that volume or `MAX_LEAKED` helpers are hung.
+/// Check and registration happen under one lock.
+fn admit(key: &str) -> Option<Permit> {
+    with_registry(|r| {
+        let hung = r.helpers.values().filter(|(_, h)| *h).count();
+        if hung >= MAX_LEAKED || r.helpers.values().any(|(k, h)| *h && k == key) {
+            return None;
+        }
+        r.next += 1;
+        let id = r.next;
+        r.helpers.insert(id, (key.to_string(), false));
+        Some(Permit(id))
+    })
+}
+
+fn mark_hung(id: u64) {
+    with_registry(|r| {
+        if let Some(entry) = r.helpers.get_mut(&id) {
+            entry.1 = true;
+        }
+    });
+}
+
+fn hung_count() -> usize {
+    with_registry(|r| r.helpers.values().filter(|(_, h)| *h).count())
+}
+
+/// Prepare with a deadline, and the bookkeeping of abandoned helper threads (see `PREPARE_DEADLINE`).
+struct Guard {
+    deadline: Duration,
+    opts: Arc<IndexOptions>,
+    gate: Arc<OcrGate>,
+}
+
+impl Guard {
+    fn prepare(&self, job: &Job) -> Prepared {
+        let unavailable = |msg: String| Prepared { job: job.clone(), result: Err(Leave::Unavailable(msg)) };
+        let key = volume_key(&job.file.path);
+        #[cfg(test)]
+        if job.file.path.contains("/hang-late-") {
+            std::thread::sleep(Duration::from_millis(500)); // arrive after the first hang timed out
+        }
+        let Some(permit) = admit(&key) else {
+            return unavailable("drive not responding".into());
+        };
+        let id = permit.0;
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (owned, opts, gate) = (job.clone(), self.opts.clone(), self.gate.clone());
+        let spawned = std::thread::Builder::new().name("dtfu-prepare".into()).stack_size(8 << 20).spawn(move || {
+            let _permit = permit; // released on return and on panic
+            #[cfg(test)]
+            test_hang(&owned);
+            let prepared = prepare(&owned, &opts, &*gate);
+            let _ = tx.send(prepared); // the waiter may be gone: then the result is dropped, never committed
+        });
+        if spawned.is_err() {
+            return unavailable("cannot start a reader thread".into()); // the closure (and its permit) is dropped
+        }
+        match rx.recv_timeout(self.deadline) {
+            Ok(prepared) => prepared,
+            Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => {
+                mark_hung(id); // no-op when the helper already finished
+                unavailable(format!("timed out reading {}", job.file.path))
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+static HANG_STARTED: Mutex<Vec<String>> = Mutex::new(Vec::new());
+/// Test hook: a file named `hang-*` blocks its prepare for 3 s, like a dead share.
+#[cfg(test)]
+fn test_hang(job: &Job) {
+    let name = Path::new(&job.file.path).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    if name.starts_with("hang-") {
+        HANG_STARTED.lock().unwrap().push(job.file.path.clone());
+        if !name.starts_with("hang-late-") {
+            std::thread::sleep(Duration::from_secs(3));
+        }
+    }
+}
+
+fn deadline_for(_jobs: &[Job]) -> Duration {
+    #[cfg(test)]
+    if _jobs.iter().any(|j| j.file.path.contains("/hang-")) {
+        return Duration::from_millis(200);
+    }
+    PREPARE_DEADLINE
+}
+
 /// Prepares and commits `jobs` in order. `progress` is (events already sent, total events of the whole run).
 /// Returns the count per final state and the events sent so far.
 #[allow(clippy::too_many_arguments)]
@@ -310,13 +477,22 @@ fn process(
     let mut finished: HashSet<i64> = HashSet::new();
     let batch = (rayon::current_num_threads() * 2).max(4);
     let (tx, rx) = sync_channel::<Prepared>(batch);
+    // SAFETY: the borrowed `ocr` is only reachable through `gate`, which `_close` shuts before this function returns.
+    let ocr_static: &'static dyn Ocr = unsafe { std::mem::transmute::<&dyn Ocr, &'static dyn Ocr>(ocr) };
+    let gate = Arc::new(OcrGate { ocr: ocr_static, alive: RwLock::new(true) });
+    let _close = CloseGate(gate.clone());
+    let guard = Guard { deadline: deadline_for(&jobs), opts: Arc::new(opts.clone()), gate };
     let mut outcome: Result<()> = Ok(());
     std::thread::scope(|scope| {
         let jobs_ref = &jobs;
+        let guard = &guard;
         scope.spawn(move || {
             // Chunks keep the order (steps of one file must commit in order); the channel bounds memory.
             for chunk in jobs_ref.chunks(batch) {
-                let prepared: Vec<Prepared> = chunk.par_iter().map(|job| prepare(job, opts, ocr)).collect();
+                if hung_count() >= MAX_LEAKED {
+                    return; // too many drives not answering: end the run, the rest stays pending
+                }
+                let prepared: Vec<Prepared> = chunk.par_iter().map(|job| guard.prepare(job)).collect();
                 for p in prepared {
                     if tx.send(p).is_err() {
                         return;
@@ -334,19 +510,28 @@ fn process(
                 continue;
             }
             let started = Instant::now();
+            let unavailable = matches!(prepared.result, Err(Leave::Unavailable(_)));
             if let Err(e) = commit(store, embedder, prepared, opts) {
                 outcome = Err(e);
                 break;
             }
-            let (state, note) = match settled_state(store, file.id) {
+            let (mut state, mut note) = match settled_state(store, file.id) {
                 Ok(v) => v,
                 Err(e) => {
                     outcome = Err(e);
                     break;
                 }
             };
-            // A file that ends sooner than its steps said (length was a guess, or it went unreadable) skips the rest.
-            if state != "partial" {
+            if state == "pending" || unavailable {
+                // Commit left the row alone (folder unavailable; a `partial` row stays `partial`): not settled, so it is
+                // retried in a later run, never done or failed. Its
+                // remaining steps are skipped for the rest of this run, and it is not counted as done or failed.
+                state = "unavailable".into();
+                note = Some("folder unavailable, stays pending".into());
+                finished.insert(file.id);
+                count(&mut states, &state);
+            } else if state != "partial" {
+                // A file that ends sooner than its steps said (length was a guess, or it went unreadable) skips the rest.
                 finished.insert(file.id);
                 count(&mut states, &state);
             }
@@ -366,8 +551,6 @@ fn settled_state(store: &IndexStore, id: i64) -> Result<(String, Option<String>)
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    use std::sync::Arc;
 
     fn record(id: i64, path: &str, kind: dtfu_core::FileKind) -> FileRecord {
         FileRecord {
@@ -484,6 +667,118 @@ mod tests {
         let stop = || seen.get() >= 2;
         run(&mut store, &mut fake, &NoOcr, &opts, None, None, &stop, &mut |_| seen.set(seen.get() + 1)).unwrap();
         assert_eq!(store.pending_count().unwrap(), 2);
+    }
+
+    #[test]
+    fn file_whose_folder_vanished_stays_pending_and_the_rest_finish() {
+        let root = temp("vanish");
+        let vol = root.join("usb");
+        std::fs::create_dir_all(&vol).unwrap();
+        std::fs::write(vol.join("gone.txt"), "A note on the drive that gets unplugged before its turn.").unwrap();
+        std::fs::write(root.join("here.txt"), "A note on the internal disk about tomatoes.").unwrap();
+        std::fs::write(root.join("also.txt"), "Another note on the internal disk about basil.").unwrap();
+        let dir = temp("store-vanish");
+        let mut store = IndexStore::open(&dir, "index.sqlite").unwrap();
+        let opts = IndexOptions::default();
+        sync(&mut store, std::slice::from_ref(&root), &opts, false).unwrap();
+        let mut fake = FakeEmbedder::default();
+        check_model(&mut store, &fake, &opts, false, false).unwrap();
+        // The drive disappears between sync and run.
+        std::fs::remove_dir_all(&vol).unwrap();
+
+        let mut events = Vec::new();
+        let states = run(&mut store, &mut fake, &NoOcr, &opts, None, None, &|| false, &mut |e| events.push(e.clone())).unwrap();
+        assert_eq!(states.get("unavailable").copied(), Some(1), "{states:?}");
+        assert_eq!(states.get("failed").copied(), None, "{states:?}");
+        assert_eq!(states.get("done").copied(), Some(2), "{states:?}");
+        assert_eq!(events.len(), 3, "{events:?}");
+        let state_of = |name: &str| -> String {
+            store
+                .connection()
+                .query_row("SELECT state FROM files WHERE path LIKE ?1", [format!("%/{name}")], |r| r.get(0))
+                .unwrap()
+        };
+        assert_eq!(state_of("gone.txt"), "pending");
+        assert_eq!(state_of("here.txt"), "done");
+        assert_eq!(state_of("also.txt"), "done");
+        assert_eq!(store.pending_count().unwrap(), 1);
+    }
+
+    #[test]
+    fn hung_prepare_leaves_the_file_pending_and_the_run_finishes() {
+        let root = temp("hang");
+        for v in ["vol-a", "vol-b"] {
+            std::fs::create_dir_all(root.join(v)).unwrap();
+        }
+        std::fs::write(root.join("vol-a/hang-1.txt"), "A note on a share that stopped answering.").unwrap();
+        std::fs::write(root.join("vol-a/hang-late-2.txt"), "Another note on the same dead share.").unwrap();
+        std::fs::write(root.join("vol-b/x.txt"), "A note on a healthy disk about tomatoes.").unwrap();
+        std::fs::write(root.join("vol-b/y.txt"), "Another note on the healthy disk about basil.").unwrap();
+        let mut store = IndexStore::open(&temp("store-hang"), "index.sqlite").unwrap();
+        let mut fake = FakeEmbedder::default();
+        let opts = IndexOptions::default();
+        check_model(&mut store, &fake, &opts, false, false).unwrap();
+        sync(&mut store, std::slice::from_ref(&root), &opts, false).unwrap();
+        let started = Instant::now();
+        let mut events = Vec::new();
+        let states = run(&mut store, &mut fake, &NoOcr, &opts, None, None, &|| false, &mut |e| events.push(e.clone())).unwrap();
+        assert!(started.elapsed() < Duration::from_millis(2500), "run waited for the hung read: {:?}", started.elapsed());
+        assert_eq!(states.get("done").copied(), Some(2), "{states:?}");
+        assert_eq!(states.get("unavailable").copied(), Some(2), "{states:?}");
+        assert_eq!(states.get("failed").copied(), None, "{states:?}");
+        let started_here = HANG_STARTED.lock().unwrap().iter().filter(|p| p.starts_with(root.to_str().unwrap())).count();
+        assert_eq!(started_here, 1, "second file of the same drive must not spawn a thread");
+        let notes: Vec<_> = events.iter().filter_map(|e| e.note.clone()).collect();
+        assert!(notes.iter().any(|n| n.contains("stays pending")), "{notes:?}");
+        assert_eq!(store.pending_count().unwrap(), 2);
+    }
+
+    #[test]
+    fn same_key_files_in_one_chunk_leave_one_hung_helper() {
+        let root = temp("hang-chunk");
+        std::fs::create_dir_all(root.join("vol-d")).unwrap();
+        std::fs::write(root.join("vol-d/hang-1.txt"), "A note on a dead share, first.").unwrap();
+        for n in 2..5 {
+            std::fs::write(root.join(format!("vol-d/hang-late-{n}.txt")), format!("More notes on the dead share {n}.")).unwrap();
+        }
+        let mut store = IndexStore::open(&temp("store-hang-chunk"), "index.sqlite").unwrap();
+        let mut fake = FakeEmbedder::default();
+        let opts = IndexOptions::default();
+        check_model(&mut store, &fake, &opts, false, false).unwrap();
+        sync(&mut store, std::slice::from_ref(&root), &opts, false).unwrap();
+        let key = volume_key(root.join("vol-d/x.txt").to_str().unwrap());
+        run(&mut store, &mut fake, &NoOcr, &opts, None, None, &|| false, &mut |_| {}).unwrap();
+        let hung_for_key = with_registry(|r| r.helpers.values().filter(|(k, h)| *h && *k == key).count());
+        assert_eq!(hung_for_key, 1);
+        let started_here = HANG_STARTED.lock().unwrap().iter().filter(|p| p.starts_with(root.to_str().unwrap())).count();
+        assert_eq!(started_here, 1);
+        assert_eq!(store.pending_count().unwrap(), 4);
+    }
+
+    #[test]
+    fn helper_panic_releases_its_permit() {
+        let key = "/vol-panic-test";
+        let permit = admit(key).unwrap();
+        let id = permit.0;
+        let t = std::thread::spawn(move || {
+            let _permit = permit;
+            panic!("boom");
+        });
+        assert!(t.join().is_err());
+        assert!(with_registry(|r| !r.helpers.contains_key(&id)));
+        assert!(admit(key).is_some());
+    }
+
+    #[test]
+    fn hung_helper_blocks_only_its_own_key() {
+        let a = admit("/vol-block-a").unwrap();
+        let healthy = admit("/vol-block-a").unwrap(); // in flight but not hung: still admitted
+        mark_hung(a.0);
+        assert!(admit("/vol-block-a").is_none());
+        assert!(admit("/vol-block-b").is_some());
+        drop(a);
+        assert!(admit("/vol-block-a").is_some());
+        drop(healthy);
     }
 
     const NOTE: &str = "A short note about penguins and their habitat.";

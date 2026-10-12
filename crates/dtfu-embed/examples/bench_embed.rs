@@ -13,7 +13,7 @@ fn main() -> anyhow::Result<()> {
     let mut e = Embedder::new(
         &models.join("embeddinggemma-2-Q8_0.gguf"),
         Some(&models.join("mmproj-embeddinggemma-2-Q8_0.gguf")),
-        &Options { threads, gpu_layers: std::env::var("DTFU_GPU_LAYERS").ok().and_then(|v| v.parse().ok()).unwrap_or(999) },
+        &Options { threads, gpu_layers: std::env::var("DTFU_GPU_LAYERS").ok().and_then(|v| v.parse().ok()).unwrap_or(999), ..Default::default() },
     )?;
     println!("load + warm-up: {:.2} s (threads {:?})", t0.elapsed().as_secs_f64(), threads);
 

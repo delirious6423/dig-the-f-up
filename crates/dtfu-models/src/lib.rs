@@ -243,6 +243,7 @@ pub fn download_cancellable(
     fs::create_dir_all(dest_dir).with_context(|| format!("create {}", dest_dir.display()))?;
     let final_path = dest_dir.join(file.name);
     let part_path = dest_dir.join(format!("{}.part", file.name));
+    let _lock = lock_download(dest_dir, file.name)?;
 
     if has_size(&final_path, file.bytes) && verify(&final_path, file).is_ok() {
         progress(file.bytes, file.bytes);
@@ -380,9 +381,79 @@ fn finish(file: &ModelFile, part_path: &Path, final_path: &Path) -> Result<PathB
             file.name
         )));
     }
+    File::open(part_path)
+        .and_then(|f| f.sync_all())
+        .with_context(|| format!("sync {}", part_path.display()))?;
     fs::rename(part_path, final_path)
         .with_context(|| format!("rename to {}", final_path.display()))?;
+    sync_parent_dir(final_path);
     Ok(final_path.to_path_buf())
+}
+
+/// Best-effort fsync of the folder holding `path`, so a rename survives a crash (unix only; errors ignored).
+fn sync_parent_dir(path: &Path) {
+    #[cfg(unix)]
+    if let Some(parent) = path.parent() {
+        let parent = if parent.as_os_str().is_empty() { Path::new(".") } else { parent };
+        if let Ok(d) = File::open(parent) {
+            let _ = d.sync_all();
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+}
+
+/// Exclusive lock on `<name>.lock`, held while this process downloads `name`; released on drop.
+struct DownloadLock(#[allow(dead_code)] File);
+
+fn lock_download(dir: &Path, name: &str) -> Result<DownloadLock> {
+    let path = dir.join(format!("{name}.lock"));
+    let f = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)
+        .with_context(|| format!("open {}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        // SAFETY: plain flock(2) on a file descriptor we own.
+        let rc = unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        if rc != 0 {
+            let err = std::io::Error::last_os_error();
+            if err.kind() == ErrorKind::WouldBlock {
+                bail!("another download of {name} is in progress");
+            }
+            return Err(err).with_context(|| format!("lock {}", path.display()));
+        }
+    }
+    // Windows: no cross-process lock here; the .lock file is only a marker.
+    Ok(DownloadLock(f))
+}
+
+/// Writes `bytes` to `path` atomically: a unique temp file in the same folder (`<file>.<pid>.<nanos>.tmp`), fsync,
+/// rename, then a best-effort fsync of the folder. The temp file is removed on error.
+pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let mut name = path.file_name().map(|n| n.to_os_string()).unwrap_or_default();
+    name.push(format!(".{}.{nanos}.tmp", std::process::id()));
+    let tmp = path.with_file_name(name);
+    let result = (|| {
+        let mut f = File::create(&tmp)?;
+        f.write_all(bytes)?;
+        f.sync_all()?;
+        drop(f);
+        fs::rename(&tmp, path)
+    })();
+    if let Err(e) = result {
+        let _ = fs::remove_file(&tmp);
+        return Err(e);
+    }
+    sync_parent_dir(path);
+    Ok(())
 }
 
 // ureq's error type is large; it is matched on directly (416 handling), so it is not boxed.
@@ -411,6 +482,25 @@ fn env_dir(key: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod lighton_tests {
     use super::*;
+
+    #[test]
+    fn write_atomic_replaces_and_leaves_no_tmp() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("settings.json");
+        write_atomic(&p, b"one").unwrap();
+        write_atomic(&p, b"two").unwrap();
+        assert_eq!(fs::read(&p).unwrap(), b"two");
+        assert_eq!(fs::read_dir(d.path()).unwrap().count(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn second_download_lock_is_refused() {
+        let d = tempfile::tempdir().unwrap();
+        let _a = lock_download(d.path(), "m.bin").unwrap();
+        let e = lock_download(d.path(), "m.bin").err().unwrap();
+        assert!(e.to_string().contains("another download of m.bin is in progress"), "{e}");
+    }
 
     #[test]
     fn search_paths_include_standard_folder() {

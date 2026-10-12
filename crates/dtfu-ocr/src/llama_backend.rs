@@ -60,6 +60,10 @@ pub struct Options {
     /// Install ggml's abort callback (needed for the timeout). `DTFU_OCR_NO_ABORT=1` turns it off; that exists
     /// only to measure the callback's cost.
     pub abort_hook: bool,
+    /// Memory-map the GGUF weights (true) or read them fully into RAM (false, the default), so an unplugged drive
+    /// or a replaced model file cannot SIGBUS the process (see dtfu-embed `Options::use_mmap` for the cost). The
+    /// mmproj is not mmapped by clip either way.
+    pub use_mmap: bool,
 }
 
 impl Default for Options {
@@ -74,6 +78,7 @@ impl Default for Options {
                 .map(|v| v.clamp(64, 4096) as usize)
                 .unwrap_or(if cfg!(target_os = "macos") { MAX_SIDE } else { MAX_SIDE_CPU }),
             abort_hook: std::env::var_os("DTFU_OCR_NO_ABORT").is_none(),
+            use_mmap: false,
         }
     }
 }
@@ -156,6 +161,11 @@ impl LightOn {
         unsafe {
             let mut params = sys::llama_model_default_params();
             params.n_gpu_layers = opts.gpu_layers;
+            if !opts.use_mmap {
+                // LLAMA_LOAD_MODE_AUTO (the default) maps the file; NONE reads every tensor into memory.
+                params.load_mode = sys::LLAMA_LOAD_MODE_NONE;
+                params.lazy_mode = sys::LLAMA_LAZY_MODE_OFF;
+            }
             let model = NonNull::new(sys::llama_model_load_from_file(mp.as_ptr(), params))
                 .ok_or_else(|| format!("can't load {}", model_path.display()))?;
 

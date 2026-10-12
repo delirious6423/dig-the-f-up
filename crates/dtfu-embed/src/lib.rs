@@ -49,10 +49,16 @@ pub struct Options {
     pub threads: Option<i32>,
     /// Layers offloaded to the GPU backend (999 = all, ignored by CPU-only builds).
     pub gpu_layers: i32,
+    /// Memory-map the text GGUF (true) or read it fully into RAM (false, the default). A mapped model on a drive
+    /// that is unplugged, or a model file replaced while loaded, makes the next page fault raise SIGBUS and kill the
+    /// process. Reading it costs ~60 ms more per load and the same peak RSS (M-series, embeddinggemma Q8_0:
+    /// 0.93 s vs 0.87 s, 500 vs 505 MiB; tests/mmap_compare.rs). The mmproj is read through clip's ifstream loader,
+    /// never mapped.
+    pub use_mmap: bool,
 }
 impl Default for Options {
     fn default() -> Self {
-        Self { threads: None, gpu_layers: 999 }
+        Self { threads: None, gpu_layers: 999, use_mmap: false }
     }
 }
 
@@ -87,6 +93,12 @@ impl Embedder {
         unsafe {
             let mut mp = sys::llama_model_default_params();
             mp.n_gpu_layers = opts.gpu_layers;
+            if !opts.use_mmap {
+                // LLAMA_LOAD_MODE_AUTO (the default) maps the file; NONE reads every tensor into memory.
+                // Lazy loading needs a mapping, so turn it off too.
+                mp.load_mode = sys::LLAMA_LOAD_MODE_NONE;
+                mp.lazy_mode = sys::LLAMA_LAZY_MODE_OFF;
+            }
             let model = NonNull::new(sys::llama_model_load_from_file(path.as_ptr(), mp))
                 .ok_or_else(|| anyhow!("can't load {}", text_model.display()))?;
 

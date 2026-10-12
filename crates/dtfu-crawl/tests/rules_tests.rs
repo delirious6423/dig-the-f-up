@@ -7,7 +7,9 @@ use std::fs;
 use tempfile::TempDir;
 
 fn names(r: &dtfu_crawl::CrawlReport, root: &std::path::Path) -> Vec<String> {
-    r.candidates.iter().map(|c| c.path.strip_prefix(&format!("{}/", root.display())).unwrap().to_string()).collect()
+    // Candidate paths use '/' on every platform (see `unixify` in crawler.rs).
+    let prefix = format!("{}/", root.display()).replace('\\', "/");
+    r.candidates.iter().map(|c| c.path.strip_prefix(&prefix).unwrap().to_string()).collect()
 }
 
 // RulesTests.swift:14 typeScriptIsNotVideo
