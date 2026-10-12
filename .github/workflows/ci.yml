@@ -3,6 +3,11 @@ on:
   push:
   pull_request:
 
+# A newer push to the same branch cancels the run still going for the older one.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
   # Shipped binaries must use the portable CPU baseline (NATIVE=0). Job-level so the cache key can reference them.
@@ -46,7 +51,7 @@ jobs:
           BACKEND: "auto"
         run: scripts/build-llama.sh
       - name: Tests (model-dependent tests skip when the GGUF files are absent)
-        run: cargo test --workspace --release
+        run: cargo test --workspace --release --no-fail-fast
       - name: x86 scan kernels (Linux runners are x86-64; checks AVX2 / AVX-512 against the naive kernel)
         if: runner.os == 'Linux'
         shell: bash

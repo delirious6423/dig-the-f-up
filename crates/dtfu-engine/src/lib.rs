@@ -966,7 +966,12 @@ mod tests {
         let rx = e.subscribe();
         e.add_folder(docs.clone()).unwrap();
         e.start_indexing().unwrap();
-        wait_for("indexing", || indexed(&e));
+        let t = Instant::now();
+        while !indexed(&e) && t.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        // On a timeout, say where it stopped (Windows CI: nothing indexed, cause unknown).
+        assert!(indexed(&e), "not indexed: counts {:?}, status {:?}, folders {:?}, events {:?}", e.counts(), e.status(), e.folder_states(), rx.try_iter().collect::<Vec<_>>());
         wait_for("idle", || e.status() == Status::Idle);
         let hits = e.search("walrus", 5, None).unwrap();
         assert!(hits[0].path.ends_with("a.txt"), "{hits:?}");
