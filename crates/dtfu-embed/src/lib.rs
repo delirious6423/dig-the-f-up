@@ -203,12 +203,19 @@ impl Embedder {
 
     /// Embeds already-prompted texts. Inputs are packed into shared batches (<=16 sequences, <=max_tokens tokens).
     pub fn embed_texts(&mut self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
-        let mut out = Vec::with_capacity(texts.len());
+        // Empty token lists (empty text, or tokenizer overflow) get no sequence in the batch; they get a zero vector.
+        let mut batched = Vec::with_capacity(texts.len());
+        let mut empty = Vec::with_capacity(texts.len());
         self.reset();
         for t in texts {
+            // "" still tokenizes to BOS+EOS and gets a real vector, as in the Swift app.
             let tokens = self.tokenize(t);
+            empty.push(tokens.is_empty());
+            if tokens.is_empty() {
+                continue;
+            }
             if self.sequences == MAX_SEQUENCES || self.batch_tokens + tokens.len() > self.max_tokens {
-                out.extend(self.run()?);
+                batched.extend(self.run()?);
             }
             self.begin();
             for tok in tokens {
@@ -217,8 +224,14 @@ impl Embedder {
             }
         }
         if self.sequences > 0 {
-            out.extend(self.run()?);
+            batched.extend(self.run()?);
         }
+        let mut batched = batched.into_iter();
+        let out = empty
+            .into_iter()
+            .map(|is_empty| if is_empty { Some(vec![0.0; self.embedding_size]) } else { batched.next() })
+            .collect::<Option<Vec<_>>>()
+            .ok_or_else(|| anyhow!("batch returned fewer embeddings than inputs"))?;
         Ok(out)
     }
 

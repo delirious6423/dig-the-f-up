@@ -182,8 +182,29 @@ pub fn media_by_magic(h: &[u8]) -> Option<Media> {
     None
 }
 
+/// Opens `path` for sniffing only if it is a regular file (lstat, so symlinks and special files are refused), then
+/// re-checks the opened handle with fstat. On unix the open itself uses O_NONBLOCK | O_NOFOLLOW, so a FIFO swapped in
+/// between the lstat and the open cannot block it.
+fn open_regular(path: &Path) -> Option<File> {
+    if !std::fs::symlink_metadata(path).ok()?.file_type().is_file() {
+        return None;
+    }
+    let mut opts = std::fs::OpenOptions::new();
+    opts.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW);
+    }
+    let f = opts.open(path).ok()?;
+    if !f.metadata().ok()?.file_type().is_file() {
+        return None;
+    }
+    Some(f)
+}
+
 fn read_head(path: &Path, n: usize) -> Option<Vec<u8>> {
-    let mut f = File::open(path).ok()?;
+    let mut f = open_regular(path)?;
     let mut buf = vec![0u8; n];
     let mut got = 0;
     while got < n {

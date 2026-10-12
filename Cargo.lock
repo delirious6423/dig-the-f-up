@@ -528,6 +528,7 @@ version = "0.1.0"
 name = "dtfu-crawl"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "rayon",
  "regex",
  "tempfile",

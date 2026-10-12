@@ -47,6 +47,13 @@ jobs:
         run: scripts/build-llama.sh
       - name: Tests (model-dependent tests skip when the GGUF files are absent)
         run: cargo test --workspace --release
+      - name: x86 scan kernels (Linux runners are x86-64; checks AVX2 / AVX-512 against the naive kernel)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          grep -o -w -E 'avx2|avx512f|f16c|fma' /proc/cpuinfo | sort -u | tr '\n' ' '; echo
+          cargo test -p dtfu-store --release --lib scan -- --nocapture 2>&1 | grep -E 'scan kernels|test result'
+          cargo run --release -p dtfu-store --example bench_scan -- 200000
       - name: Clippy
         # May fail until warnings in crates/dtfu-search/src/filters.rs are fixed.
         run: cargo clippy --workspace --all-targets --release -- -D warnings

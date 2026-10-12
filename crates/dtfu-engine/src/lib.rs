@@ -656,6 +656,20 @@ impl Engine {
         }
     }
 
+    /// True when `path` is exactly a file of the main or code index. Blocking (opens the stores).
+    pub fn is_indexed_file(&self, path: &str) -> Result<bool> {
+        for file in [MAIN_FILE, CODE_FILE] {
+            // Don't create an index database (e.g. the code index) just to look a path up.
+            if !self.inner.cfg.index_dir.join(file).exists() {
+                continue;
+            }
+            if IndexStore::open(&self.inner.cfg.index_dir, file)?.has_path(path)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     pub fn counts(&self) -> Result<IndexCounts> {
         let store = IndexStore::open(&self.inner.cfg.index_dir, MAIN_FILE)?;
         let c = store.counts()?;

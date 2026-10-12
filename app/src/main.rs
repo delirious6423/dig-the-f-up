@@ -336,10 +336,49 @@ fn checked_path(engine: &Engine, path: &str) -> Res<PathBuf> {
     if under { Ok(p) } else { Err("path is outside the indexed folders".into()) }
 }
 
+/// Only files the index contains may be opened or revealed: folder check first, then an exact path lookup.
+/// The stored path is what the UI passes; the canonical form is tried too (symlinked folders).
+async fn checked_indexed(engine: &Eng<'_>, path: &str) -> Res<PathBuf> {
+    let p = checked_path(engine, path)?;
+    let candidates = indexed_candidates(path, &p);
+    // What gets opened is the canonical `p`. If the file itself is a symlink (say an indexed entry later replaced by
+    // a link), its target must be indexed too; symlinked parent folders stay allowed.
+    let file_is_link = std::fs::symlink_metadata(path).map(|m| m.file_type().is_symlink()).unwrap_or(false);
+    let eng = engine.inner().clone();
+    let found = tauri::async_runtime::spawn_blocking(move || -> Res<bool> {
+        if file_is_link {
+            return match candidates.get(1) {
+                Some(c) => eng.is_indexed_file(c).map_err(err),
+                None => Ok(false),
+            };
+        }
+        for c in &candidates {
+            if eng.is_indexed_file(c).map_err(err)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    })
+    .await
+    .map_err(err)??;
+    if found { Ok(p) } else { Err("file is not in the index".into()) }
+}
+
+/// Path strings to look up in the index: as given, then canonical (when different and valid UTF-8).
+fn indexed_candidates(given: &str, canonical: &std::path::Path) -> Vec<String> {
+    let mut v = vec![given.to_string()];
+    if let Some(c) = canonical.to_str() {
+        if c != given {
+            v.push(c.to_string());
+        }
+    }
+    v
+}
+
 /// Opens a search hit at its place (`opener::open_at`). `loc`: a PDF's page or a recording's seconds; `query`: the search.
 #[tauri::command]
 async fn open_hit(app: AppHandle, engine: Eng<'_>, path: String, kind: String, loc: Option<f64>, query: String) -> Res<()> {
-    let p = checked_path(&engine, &path)?;
+    let p = checked_indexed(&engine, &path).await?;
     // Feeds ranking and indexing order when the user turned open-history on; a no-op otherwise. Never blocks the open.
     let _ = engine.record_open(&path);
     let handle = app.clone();
@@ -347,8 +386,8 @@ async fn open_hit(app: AppHandle, engine: Eng<'_>, path: String, kind: String, l
 }
 
 #[tauri::command]
-fn reveal_path(app: AppHandle, engine: Eng<'_>, path: String) -> Res<()> {
-    let p = checked_path(&engine, &path)?;
+async fn reveal_path(app: AppHandle, engine: Eng<'_>, path: String) -> Res<()> {
+    let p = checked_indexed(&engine, &path).await?;
     app.opener().reveal_item_in_dir(p).map_err(err)
 }
 
@@ -385,7 +424,10 @@ fn thumb_data_url(bytes: &[u8]) -> Option<String> {
     limits.max_image_height = Some(16384);
     limits.max_alloc = Some(256 * 1024 * 1024);
     reader.limits(limits);
-    let img = reader.decode().ok()?;
+    let mut decoder = reader.into_decoder().ok()?;
+    let orientation = image::ImageDecoder::orientation(&mut decoder).unwrap_or(image::metadata::Orientation::NoTransforms);
+    let mut img = image::DynamicImage::from_decoder(decoder).ok()?;
+    img.apply_orientation(orientation);
     let small = flatten_on_white(&img.thumbnail(THUMB_SIDE, THUMB_SIDE));
     let mut out = std::io::Cursor::new(Vec::new());
     image::DynamicImage::ImageRgb8(small).write_to(&mut out, image::ImageFormat::Jpeg).ok()?;
@@ -407,7 +449,16 @@ async fn thumbnail(engine: Eng<'_>, path: String) -> Res<Option<String>> {
         return Ok(None);
     }
     let p = checked_path(&engine, &path)?;
+    // At most THUMB_CONCURRENCY decodes at once; a scrolling result list must not spawn dozens of full decodes.
+    let _permit = thumb_semaphore().acquire().await.map_err(err)?;
     tauri::async_runtime::spawn_blocking(move || thumb_file(&p)).await.map_err(err)?
+}
+
+const THUMB_CONCURRENCY: usize = 3;
+
+fn thumb_semaphore() -> &'static tokio::sync::Semaphore {
+    static S: std::sync::OnceLock<tokio::sync::Semaphore> = std::sync::OnceLock::new();
+    S.get_or_init(|| tokio::sync::Semaphore::new(THUMB_CONCURRENCY))
 }
 
 #[tauri::command]
@@ -546,6 +597,47 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn indexed_candidates_adds_canonical_only_when_different() {
+        let c = indexed_candidates("/a/b", std::path::Path::new("/a/b"));
+        assert_eq!(c, vec!["/a/b".to_string()]);
+        let c = indexed_candidates("/l/b", std::path::Path::new("/a/b"));
+        assert_eq!(c, vec!["/l/b".to_string(), "/a/b".to_string()]);
+    }
+
+    /// A 40x20 landscape JPEG carrying EXIF orientation 6 (rotate 90 CW).
+    fn jpeg_with_orientation(o: u8) -> Vec<u8> {
+        let img = image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(40, 20, image::Rgb([200, 30, 30])));
+        let mut out = std::io::Cursor::new(Vec::new());
+        img.write_to(&mut out, image::ImageFormat::Jpeg).unwrap();
+        let jpeg = out.into_inner();
+        let mut exif: Vec<u8> = b"Exif\0\0MM\0*\0\0\0\x08".to_vec();
+        exif.extend_from_slice(&[0, 1, 0x01, 0x12, 0, 3, 0, 0, 0, 1, 0, o, 0, 0, 0, 0, 0, 0]);
+        let mut seg = vec![0xFF, 0xE1];
+        seg.extend_from_slice(&((exif.len() + 2) as u16).to_be_bytes());
+        seg.extend_from_slice(&exif);
+        let mut v = jpeg[..2].to_vec();
+        v.extend(seg);
+        v.extend_from_slice(&jpeg[2..]);
+        v
+    }
+
+    fn thumb_dims(bytes: &[u8]) -> (u32, u32) {
+        use base64::Engine as _;
+        let url = thumb_data_url(bytes).unwrap();
+        let b = base64::engine::general_purpose::STANDARD.decode(url.strip_prefix("data:image/jpeg;base64,").unwrap()).unwrap();
+        let i = image::load_from_memory(&b).unwrap();
+        (i.width(), i.height())
+    }
+
+    #[test]
+    fn thumbnail_applies_exif_orientation() {
+        let (w, h) = thumb_dims(&jpeg_with_orientation(6));
+        assert!(h > w, "orientation 6 must give a portrait thumbnail, got {w}x{h}");
+        let (w, h) = thumb_dims(&jpeg_with_orientation(1));
+        assert!(w > h, "orientation 1 stays landscape, got {w}x{h}");
+    }
 
     #[test]
     fn hit_maps_to_camel_case() {

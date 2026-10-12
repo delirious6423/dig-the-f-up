@@ -60,7 +60,7 @@ impl Default for CrawlOptions {
             sniff_magic: false,
             secrets_everywhere: false,
             threads: 0,
-            home: std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).unwrap_or_default(),
+            home: unixify(&std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).unwrap_or_default()),
         }
     }
 }
@@ -164,8 +164,12 @@ fn crawl_inner(roots: &[String], options: &CrawlOptions) -> CrawlReport {
         let skips: Vec<String> = options
             .excluded_folders
             .iter()
+            .map(|f| unixify(f))
             .filter(|f| FolderSelection::is_inside(f, root) || FolderSelection::is_inside(f, &real))
-            .flat_map(|f| [f.clone(), FolderSelection::real_path(f)])
+            .flat_map(|f| {
+                let real = FolderSelection::real_path(&f);
+                [f, real]
+            })
             .collect();
         let ctx = Ctx { opts: options, skips };
         let sink = Mutex::new(Partial::default());

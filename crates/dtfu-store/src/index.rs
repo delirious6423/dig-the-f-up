@@ -362,6 +362,11 @@ impl IndexStore {
         Ok(())
     }
 
+    /// True when a file with exactly this path is in the index.
+    pub fn has_path(&self, path: &str) -> Result<bool> {
+        Ok(self.conn.query_row("SELECT 1 FROM files WHERE path = ?1", params![path], |_| Ok(())).optional()?.is_some())
+    }
+
     /// Every file whose path is under one of `roots` (a root inside another root is not listed twice).
     pub fn files_under(&self, roots: &[String]) -> Result<Vec<FileRecord>> {
         let mut unique: Vec<&String> = Vec::new();
@@ -779,6 +784,16 @@ mod tests {
             text: None,
             vector: Some(v),
         }
+    }
+
+    #[test]
+    fn has_path_is_an_exact_match() {
+        let dir = TempDir::new();
+        let mut s = store(&dir);
+        s.insert_file(&file("/d/a.png", 1), &[]).unwrap();
+        assert!(s.has_path("/d/a.png").unwrap());
+        assert!(!s.has_path("/d/a.pn").unwrap());
+        assert!(!s.has_path("/d").unwrap());
     }
 
     #[test]

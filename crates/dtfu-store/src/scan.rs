@@ -287,6 +287,8 @@ mod tests {
         }
         assert!(ran >= 1);
         assert!(best_kernel().available());
+        let names: Vec<&str> = Kernel::ALL.into_iter().filter(|k| k.available()).map(|k| k.name()).collect();
+        eprintln!("scan kernels checked against naive: {names:?}; best: {}", best_kernel().name());
     }
 
     #[test]
