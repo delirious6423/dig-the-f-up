@@ -343,11 +343,20 @@ fn sync_with(
     if stop() {
         return Err(Stopped.into());
     }
-    let report = crawled.unwrap_or_else(|| {
+    #[allow(unused_mut)]
+    let mut report = crawled.unwrap_or_else(|| {
         // Nothing was (fully) crawled: every root keeps its rows this time.
         states.iter_mut().for_each(|s| *s = RootState::Offline);
         CrawlReport::default()
     });
+    // The crawler works in `/`-separated paths; the index keys files by their native spelling, like the roots
+    // (`root_string`) and the watcher's paths. Without this, every sync on Windows re-adds the files it already has.
+    #[cfg(windows)]
+    {
+        let native = |p: &mut String| *p = p.replace('/', "\\");
+        report.candidates.iter_mut().for_each(|c| native(&mut c.path));
+        report.unreadable_dirs.iter_mut().for_each(native);
+    }
     // A drive pulled during the crawl: the root is gone, unreadable, or now on another volume. Look again.
     for (i, r) in roots.iter().enumerate() {
         if states[i] != RootState::Online {
