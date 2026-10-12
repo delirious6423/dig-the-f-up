@@ -321,7 +321,39 @@ async fn suggested_folders() -> Vec<String> {
 #[tauri::command]
 async fn pick_folder(app: AppHandle) -> Res<Option<String>> {
     let picked = app.dialog().file().blocking_pick_folder();
-    Ok(picked.and_then(|p| p.into_path().ok()).map(|p| p.to_string_lossy().into_owned()))
+    let Some(p) = picked.and_then(|p| p.into_path().ok()) else { return Ok(None) };
+    if is_whole_drive(&p) {
+        use tauri_plugin_dialog::{MessageDialogButtons, MessageDialogKind};
+        let go = app
+            .dialog()
+            .message(format!(
+                "{} is a whole drive. Indexing it reads every file on it and can take hours. \
+                 Picking the folders you use, such as Documents or Desktop, is faster.",
+                p.display()
+            ))
+            .title("Index the whole drive?")
+            .kind(MessageDialogKind::Warning)
+            .buttons(MessageDialogButtons::OkCancelCustom("Index whole drive".into(), "Cancel".into()))
+            .blocking_show();
+        if !go {
+            return Ok(None);
+        }
+    }
+    Ok(Some(p.to_string_lossy().into_owned()))
+}
+
+/// The top of a disk: "/" or `C:\`, or a mounted drive (macOS /Volumes/X; Linux /mnt/X, /media/<user>/X).
+fn is_whole_drive(p: &std::path::Path) -> bool {
+    let Some(parent) = p.parent() else { return true };
+    let mounts: &[&str] = if cfg!(target_os = "macos") {
+        &["/Volumes"]
+    } else if cfg!(windows) {
+        &[]
+    } else {
+        &["/mnt", "/media"]
+    };
+    mounts.iter().any(|m| parent == std::path::Path::new(m))
+        || (!cfg!(target_os = "macos") && parent.parent().is_some_and(|g| g == std::path::Path::new("/media")))
 }
 
 #[tauri::command]
@@ -720,6 +752,23 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    #[cfg(unix)]
+    fn whole_drive_detection() {
+        use super::is_whole_drive;
+        use std::path::Path;
+        assert!(is_whole_drive(Path::new("/")));
+        assert!(!is_whole_drive(Path::new("/Users")));
+        assert!(!is_whole_drive(Path::new("/Users/me/Documents")));
+        if cfg!(target_os = "macos") {
+            assert!(is_whole_drive(Path::new("/Volumes/Backup")));
+            assert!(!is_whole_drive(Path::new("/Volumes/Backup/Photos")));
+        } else {
+            assert!(is_whole_drive(Path::new("/media/me/usb")));
+            assert!(is_whole_drive(Path::new("/mnt/data")));
+        }
+    }
+
     use super::*;
 
     #[test]

@@ -296,6 +296,7 @@ fn walk_dir<'s>(ctx: &'s Ctx<'s>, dir: &Path, scope: &rayon::Scope<'s>, sink: &'
         }
         let p = path_string(path);
         let reason = rules::skip_reason_for_folder(&p, &ctx.opts.home, &ctx.skips)
+            .or_else(|| system_folder_reason(&p))
             .or_else(|| if ctx.opts.code { rules::code_skip_reason_for_folder(path) } else { None });
         if let Some(r) = reason {
             *local.skipped_folders.entry(r.to_string()).or_default() += 1;
@@ -326,6 +327,32 @@ fn walk_dir<'s>(ctx: &'s Ctx<'s>, dir: &Path, scope: &rayon::Scope<'s>, sink: &'
         }
     }
     sink.lock().unwrap().merge(local);
+}
+
+/// Operating-system folders at the top of a drive, reached only when the whole disk is chosen as a folder. On macOS,
+/// /System/Volumes/Data is the data volume again, so walking /System would also index /Users a second time.
+#[cfg(target_os = "macos")]
+const SYSTEM_FOLDERS: &[&str] = &["/System", "/Library", "/private", "/usr", "/bin", "/sbin", "/cores", "/dev", "/opt"];
+#[cfg(all(unix, not(target_os = "macos")))]
+const SYSTEM_FOLDERS: &[&str] = &[
+    "/proc", "/sys", "/dev", "/run", "/usr", "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/libx32", "/etc", "/var",
+    "/boot", "/snap", "/tmp", "/opt", "/lost+found",
+];
+/// Matched after the drive letter (`C:`), case-insensitively.
+#[cfg(windows)]
+const SYSTEM_FOLDERS: &[&str] =
+    &["/Windows", "/Program Files", "/Program Files (x86)", "/ProgramData", "/$Recycle.Bin", "/System Volume Information"];
+
+/// `p` is a `/`-separated path as built by [`path_string`].
+pub fn system_folder_reason(p: &str) -> Option<&'static str> {
+    #[cfg(windows)]
+    let (p, hit) = (
+        p.get(2..).filter(|_| p.as_bytes().get(1) == Some(&b':')).unwrap_or(p),
+        |a: &str, b: &str| a.eq_ignore_ascii_case(b),
+    );
+    #[cfg(not(windows))]
+    let hit = |a: &str, b: &str| a == b;
+    SYSTEM_FOLDERS.iter().any(|s| hit(p, s)).then_some("system folder")
 }
 
 fn path_string(p: &Path) -> String {
@@ -400,4 +427,36 @@ fn stat_fields(md: &Metadata) -> (f64, u64, u64) {
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map_or(0.0, |d| d.as_secs_f64());
     (m, 0, 0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::system_folder_reason;
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn system_folders_are_skipped_only_at_the_top_of_the_disk() {
+        assert!(system_folder_reason("/System").is_some());
+        assert!(system_folder_reason("/private").is_some());
+        assert!(system_folder_reason("/Users").is_none());
+        assert!(system_folder_reason("/Users/me/System").is_none());
+        assert!(system_folder_reason("/Volumes/Backup/Library").is_none());
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn system_folders_are_skipped_only_at_the_top_of_a_drive() {
+        assert!(system_folder_reason("C:/Windows").is_some());
+        assert!(system_folder_reason("d:/program files").is_some());
+        assert!(system_folder_reason("C:/Users").is_none());
+        assert!(system_folder_reason("C:/Users/me/Windows").is_none());
+    }
+
+    #[test]
+    #[cfg(all(unix, not(target_os = "macos")))]
+    fn system_folders_are_skipped_only_at_the_top_of_the_disk() {
+        assert!(system_folder_reason("/proc").is_some());
+        assert!(system_folder_reason("/home").is_none());
+        assert!(system_folder_reason("/home/me/usr").is_none());
+    }
 }
