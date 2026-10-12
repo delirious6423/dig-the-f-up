@@ -62,8 +62,15 @@ cd app && cargo test --release         # the desktop app is a separate cargo pro
 
 ## Releases
 
-Pushing a `v*` tag (equal to `version` in `app/tauri.conf.json`) runs `.github/workflows/release.yml`. It builds the
-macOS arm64 app and attaches a zip and its SHA-256 to a draft release. It signs and notarizes only when the
-`APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`, `APPLE_ID`, `APPLE_PASSWORD` and
-`APPLE_TEAM_ID` secrets exist. Otherwise the zip is marked UNSIGNED, and users right-click > Open on first launch.
+Pushing a `v*` tag (equal to `version` in `app/tauri.conf.json`) runs `.github/workflows/release.yml`. It builds a
+macOS arm64 `.dmg`, a Windows x64 NSIS setup `.exe` and a Linux x86_64 `.AppImage` and amd64 `.deb`, each with a
+`.sha256`, and attaches them to a draft release; publish it by hand. File names carry no version
+(`Dig-the-f-up-macos-arm64.dmg`), so the README's `releases/latest/download/...` links always fetch the newest
+published release. The packages bundle our own LGPL ffmpeg/ffprobe (`scripts/build-ffmpeg.sh`) and, on Windows and
+Linux, pdfium (`scripts/fetch-pdfium.sh`).
+
+macOS builds are signed and notarized only when the `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`,
+`APPLE_SIGNING_IDENTITY`, `APPLE_ID`, `APPLE_PASSWORD` and `APPLE_TEAM_ID` secrets exist; otherwise users confirm the
+first launch (the release notes say how). To build the Mac package locally: `scripts/build-ffmpeg.sh`, then
+`cd app && cargo tauri build --bundles app --config tauri.release.conf.json`, then `scripts/make-dmg.sh`.
 Regenerate the licence inventory with `scripts/gen-third-party-licenses.sh` when dependencies change.

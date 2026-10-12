@@ -1,6 +1,6 @@
 # Third-party components
 
-What the Dig-the-f-up desktop app (`app/`, macOS Apple Silicon) contains or needs at run time. Checked against the source
+What the Dig-the-f-up desktop app (`app/`; macOS Apple Silicon, Windows x64, Linux x86_64) contains or needs at run time. Checked against the source
 and the build scripts; the bundle contents were not inspected after a release build.
 
 ## Compiled into the app
@@ -28,7 +28,7 @@ frameworks reached through the Tauri and `objc2-*` crates are also system-provid
 | Item | Why it is not in the app |
 | --- | --- |
 | EmbeddingGemma 2 model (`embeddinggemma-2-Q8_0.gguf`, `mmproj-embeddinggemma-2-Q8_0.gguf`) | Downloaded at run time from the pinned Hugging Face revision into the data folder. Not in the `.app`. Model license: Apache 2.0 (Google DeepMind). |
-| LightOnOCR-3-0.8B (`LightOnOCR-3-0.8B.Q8_0.gguf`, `LightOnOCR-3-0.8B.mmproj-f16.gguf`) | All platforms: downloaded at run time (about 1 GB) from the community GGUF conversion mradermacher/LightOnOCR-3-0.8B-GGUF at a pinned revision into `<models dir>/lightonocr`, pinned by size and SHA-256 (`crates/dtfu-models`). Not bundled. Model by LightOn, Apache-2.0 (https://huggingface.co/lightonai/LightOnOCR-3-0.8B); used unmodified. |
+| LightOnOCR-3-0.8B (`LightOnOCR-3-0.8B.Q8_0.gguf`, `LightOnOCR-3-0.8B.mmproj-f16.gguf`) | Windows and Linux: downloaded by the app at run time (about 1 GB); macOS: only with `dtfu download`. Fetched from the community GGUF conversion mradermacher/LightOnOCR-3-0.8B-GGUF at a pinned revision into `<models dir>/lightonocr`, pinned by size and SHA-256 (`crates/dtfu-models`). Not bundled. Model by LightOn, Apache-2.0 (https://huggingface.co/lightonai/LightOnOCR-3-0.8B); used unmodified. |
 | ocrs OCR models (`text-detection.rten`, `text-recognition.rten`) | Windows and Linux only: downloaded at run time (12 MB) from the ocrs project's model bucket into `<data dir>/Dig-the-f-up/ocr`, pinned by size and SHA-256 (`crates/dtfu-models`). Not bundled. Models by Robert Knight, CC-BY-SA 4.0 (https://huggingface.co/robertknight/ocrs), trained on HierText (CC-BY-SA 4.0); used unmodified. The `ocrs` and `rten` crates are MIT/Apache-2.0. |
 | ffmpeg / ffprobe | Source builds: read by running the `ffmpeg` and `ffprobe` programs that the user has installed (`crates/dtfu-extract-video`). Without them, video files cannot be indexed (`VideoError::Missing`, "ffmpeg not found"). Release packages bundle them; see the section above. |
 | pdfium | Used only on non-macOS builds, or on macOS with the `pdfium` feature for tests. The macOS app uses PDFKit. Source builds: not bundled. Windows and Linux release packages bundle it; see the section above. |

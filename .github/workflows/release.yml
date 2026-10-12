@@ -180,7 +180,7 @@ jobs:
           set -euo pipefail
           app="app/target/release/bundle/macos/Dig-the-f-up.app"
           test -d "$app"
-          name="Dig-the-f-up-${VERSION}-macos-arm64.dmg"
+          name="Dig-the-f-up-macos-arm64.dmg"
           mkdir -p dist-out
           scripts/make-dmg.sh "$app" "dist-out/$name"
           (cd dist-out && shasum -a 256 "$name" > "$name.sha256")
@@ -268,7 +268,7 @@ jobs:
           mkdir -p dist-out
           src=( app/target/release/bundle/nsis/*-setup.exe )
           test -f "${src[0]}"
-          name="Dig-the-f-up-${VERSION}-windows-x64-setup.exe"
+          name="Dig-the-f-up-windows-x64-setup.exe"
           cp "${src[0]}" "dist-out/$name"
           (cd dist-out && sha256sum "$name" > "$name.sha256")
           cat "dist-out/$name.sha256"
@@ -354,8 +354,8 @@ jobs:
           deb=( app/target/release/bundle/deb/*.deb )
           test -f "${appimage[0]}"
           test -f "${deb[0]}"
-          ai="Dig-the-f-up-${VERSION}-linux-x86_64.AppImage"
-          dn="Dig-the-f-up-${VERSION}-linux-amd64.deb"
+          ai="Dig-the-f-up-linux-x86_64.AppImage"
+          dn="Dig-the-f-up-linux-amd64.deb"
           cp "${appimage[0]}" "dist-out/$ai"
           cp "${deb[0]}" "dist-out/$dn"
           (cd dist-out && sha256sum "$ai" > "$ai.sha256" && sha256sum "$dn" > "$dn.sha256")

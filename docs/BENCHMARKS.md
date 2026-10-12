@@ -59,7 +59,7 @@ Embedding throughput, Metal against CPU only (`cargo run --release -p dtfu-embed
 | engine | median per image | character error rate | peak memory |
 |---|---|---|---|
 | Apple Vision (default on macOS) | 0.07 s | 0.050 | 262 MB |
-| LightOnOCR-3 0.8B (default on Windows and Linux; Vision's fallback on macOS) | 1.48 s | 0.008 | 1.81 GB |
+| LightOnOCR-3 0.8B (default on Windows and Linux; Vision's fallback on macOS once installed with `dtfu download`) | 1.48 s | 0.008 | 1.81 GB |
 | ocrs 0.13 (Windows and Linux until LightOn is downloaded) | 0.13 s* | 0.183 (Latin-script images: 0.078) | not measured |
 
 ocrs reads Latin script only: the Arabic, Russian and Chinese images score ~1.0. On the other 15 it is at or under
