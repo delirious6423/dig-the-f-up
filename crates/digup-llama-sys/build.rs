@@ -50,7 +50,8 @@ fn main() {
             }
         }
     } else if target.contains("windows") {
-        // MSVC links the C++ runtime itself.
+        // MSVC links the C++ runtime itself; ggml-cpu reads the registry for CPU info.
+        println!("cargo:rustc-link-lib=advapi32");
     } else {
         println!("cargo:rustc-link-lib=stdc++");
         println!("cargo:rustc-link-lib=gomp"); // GGML_OPENMP=ON
