@@ -1,7 +1,7 @@
 //! Pure event coalescer: per-path entries, debounce, quiet window, hard cap and the storm fallback.
 //!
 //! No threads and no clock of its own: every call takes `now`, so the whole state machine is unit-testable.
-//! Rules follow docs/spec-pipeline.md 2.8 (Engine.swift:401-447):
+//! Rules follow docs/porting/spec-pipeline.md 2.8 (Engine.swift:401-447):
 //! - Main lane: a sync is due `debounce` (750 ms) after the last event, or `max_wait` after the first.
 //! - Code lane: a path is settled after `quiet` (60 s) without events, or `max_wait` (600 s) after its first event.
 //! - Storm: more than `storm_cap` pending paths drop the per-path entries and become one `RescanRoots`.

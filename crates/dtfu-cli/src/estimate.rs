@@ -1,5 +1,5 @@
 //! Port of Swift `Estimator` (reference/digup-swift/Sources/DigUpKit/Estimator.swift:1-147) and of the text output of
-//! `dtfu estimate` (main.swift:198-273). Formulas: docs/spec-pipeline.md section 3.14. `--json` is not ported here.
+//! `dtfu estimate` (main.swift:198-273). Formulas: docs/porting/spec-pipeline.md section 3.14. `--json` is not ported here.
 //!
 //! Code mode: the Swift `--code` flag is `IndexOptions.include_code` in this CLI (see `cmd_index` in main.rs).
 //!

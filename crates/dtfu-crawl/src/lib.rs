@@ -1,5 +1,5 @@
 //! Port of DigUpKit `Crawler.swift`, `Rules.swift` and `FolderSelection.swift`
-//! (spec: docs/spec-pipeline.md sections 1-4). Metadata-only parallel crawl.
+//! (spec: docs/porting/spec-pipeline.md sections 1-4). Metadata-only parallel crawl.
 
 pub mod crawler;
 pub mod folder_selection;

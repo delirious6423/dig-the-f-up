@@ -1,5 +1,5 @@
 //! The long-running scheduler: sync, new files first, backfill when allowed, code second, long files last.
-//! Port of Swift `IndexService.run` (docs/spec-pipeline.md section 2.7). A library: the app or CLI drives it with a
+//! Port of Swift `IndexService.run` (docs/porting/spec-pipeline.md section 2.7). A library: the app or CLI drives it with a
 //! `Control` handle from another thread and receives `ServiceEvent`s through a callback.
 
 use crate::options::IndexOptions;

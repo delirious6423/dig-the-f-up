@@ -6,7 +6,7 @@ EmbeddingGemma 2, for macOS (Apple Silicon only; no Intel Mac targets), Windows 
 - `CONTRIBUTING.md` has the rules (parity test, Q8_0 models only, index format, measure-don't-guess, portable builds),
   the layout and the commands. Follow it.
 - Open work is in GitHub issues (`gh issue list`).
-- `docs/spec-*.md` describe the original's behaviour with `file:line` citations into `reference/digup-swift/`
+- `docs/porting/spec-*.md` describe the original's behaviour with `file:line` citations into `reference/digup-swift/`
   (fetch with `scripts/fetch-reference.sh`; read-only, never modify).
 - Any speed claim goes in `docs/BENCHMARKS.md` with machine and command.
 - Licence: Apache-2.0. Keep `NOTICE` (DigUp and llama.cpp MIT notices).

@@ -11,7 +11,7 @@ use std::time::Duration;
 use crate::coalesce::{CoalesceConfig, Coalescer, Lane, Request};
 use crate::power::{allowed, PowerPolicy, PowerSource, PowerState};
 
-/// Developer folders the main index never crawls (docs/spec-pipeline.md 3.4, skippedFolderNames).
+/// Developer folders the main index never crawls (docs/porting/spec-pipeline.md 3.4, skippedFolderNames).
 pub(crate) const MAIN_SKIP_FOLDERS: &[&str] = &[
     "node_modules",
     "bower_components",
@@ -23,7 +23,7 @@ pub(crate) const MAIN_SKIP_FOLDERS: &[&str] = &[
     "Carthage",
 ];
 
-/// Extra folders skipped for code projects (docs/spec-pipeline.md 2.8, Engine.swift codeNoise).
+/// Extra folders skipped for code projects (docs/porting/spec-pipeline.md 2.8, Engine.swift codeNoise).
 pub(crate) const CODE_NOISE_FOLDERS: &[&str] = &[
     "node_modules",
     "bower_components",

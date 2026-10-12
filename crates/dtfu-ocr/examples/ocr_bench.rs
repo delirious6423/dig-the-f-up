@@ -9,16 +9,24 @@ use dtfu_ocr::{recognize_rgb_with, Engine};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+#[cfg(unix)]
 extern "C" {
     fn getloadavg(avg: *mut f64, n: i32) -> i32;
 }
 
+#[cfg(unix)]
 fn load1() -> f64 {
     let mut a = [0f64; 3];
     if unsafe { getloadavg(a.as_mut_ptr(), 3) } < 1 {
         return f64::NAN;
     }
     a[0]
+}
+
+/// Windows has no load average: report 0 so the idle gate never waits there.
+#[cfg(not(unix))]
+fn load1() -> f64 {
+    0.0
 }
 
 fn wait_for_idle() -> bool {

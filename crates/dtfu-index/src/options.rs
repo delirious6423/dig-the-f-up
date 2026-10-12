@@ -1,4 +1,4 @@
-//! Port of Swift `IndexOptions` (docs/spec-pipeline.md section 3.1).
+//! Port of Swift `IndexOptions` (docs/porting/spec-pipeline.md section 3.1).
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -71,7 +71,7 @@ impl Default for IndexOptions {
 }
 
 /// Bump when extraction changes in a way that should re-embed (chunk size, render sizes, OCR choice...). Swift has no
-/// such version, so changes there never trigger a reindex (docs/spec-pipeline.md section 2.3).
+/// such version, so changes there never trigger a reindex (docs/porting/spec-pipeline.md section 2.3).
 pub const EXTRACTOR_VERSION: u32 = 1;
 
 impl IndexOptions {

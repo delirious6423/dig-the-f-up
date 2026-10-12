@@ -1,6 +1,6 @@
 //! Power state and the policy that decides when a sync may fire.
 //!
-//! Spec: docs/spec-pipeline.md 2.8 (PowerPolicy.swift:54-63). Low Power Mode always counts as "do not
+//! Spec: docs/porting/spec-pipeline.md 2.8 (PowerPolicy.swift:54-63). Low Power Mode always counts as "do not
 //! start background work", matching the Swift backfill blocker. Thermal state is not read (no stable API
 //! on Linux or Windows; the spec calls it optional).
 

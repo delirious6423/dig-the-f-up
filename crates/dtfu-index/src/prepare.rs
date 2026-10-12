@@ -1,5 +1,5 @@
 //! Prepare stage: decode / extract ONE job into a `Payload`. No embedding, no database writes.
-//! Port of Swift `Indexer.prepare` (Indexer.swift:358-440, docs/spec-pipeline.md section 2.5).
+//! Port of Swift `Indexer.prepare` (Indexer.swift:358-440, docs/porting/spec-pipeline.md section 2.5).
 
 use crate::options::IndexOptions;
 use crate::types::{Job, Leave, Ocr, Payload, PdfPage, Prepared, VideoFrame};

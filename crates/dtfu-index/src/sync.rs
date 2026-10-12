@@ -1,4 +1,4 @@
-//! Sync: crawl the roots and bring the store in line (docs/spec-pipeline.md section 2.2).
+//! Sync: crawl the roots and bring the store in line (docs/porting/spec-pipeline.md section 2.2).
 //! Port of Swift `Indexer.sync` (Indexer.swift:86-129).
 
 use std::collections::{HashMap, HashSet};

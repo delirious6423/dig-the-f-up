@@ -1,4 +1,4 @@
-//! Commit stage: embed a prepared job and write its segments (docs/spec-pipeline.md section 2.5).
+//! Commit stage: embed a prepared job and write its segments (docs/porting/spec-pipeline.md section 2.5).
 //! Port of Swift `Indexer.commit` and its `images`/`doc`/`audio`/`code` helpers.
 
 use crate::options::IndexOptions;

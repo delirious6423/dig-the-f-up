@@ -1,4 +1,4 @@
-//! Locates and downloads the EmbeddingGemma 2 model files (docs/spec-embedder.md section 1).
+//! Locates and downloads the EmbeddingGemma 2 model files (docs/porting/spec-embedder.md section 1).
 //!
 //! Lookup order: `$DTFU_MODELS` if set (only that folder), else the app's models folder, then the Hugging Face
 //! cache snapshot for the pinned revision. A file counts as present only when its size matches; checksums are
