@@ -1,10 +1,11 @@
 name: release
 
-# Builds the macOS (Apple Silicon) app bundle for a version tag and attaches it to a DRAFT GitHub release.
-# Nothing is published automatically: the owner reviews the draft and clicks Publish. See CONTRIBUTING.md, Releases.
+# Builds unsigned (unless macOS signing secrets exist) user-friendly packages for every platform on a version tag and
+# attaches them all to ONE DRAFT GitHub release. Nothing is published automatically: the owner reviews the draft and
+# clicks Publish. See CONTRIBUTING.md, Releases.
 #
-# Signing and notarization run only when the matching repository secrets exist. Without them the job still
-# produces an unsigned, un-notarized zip whose name says so.
+# Packages: macOS arm64 .dmg, Windows x64 NSIS setup .exe, Linux x86_64 .AppImage and amd64 .deb (+ .sha256 for each).
+# macOS signing and notarization run only when the matching repository secrets exist.
 
 on:
   push:
@@ -18,13 +19,65 @@ env:
   CARGO_TERM_COLOR: always
   # Shipped binaries must use the portable CPU baseline (same setting as ci.yml).
   NATIVE: "0"
-  BACKEND: "metal"
 
 jobs:
+  draft:
+    name: Create draft release
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check tag matches app version
+        shell: bash
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          app_ver="$(sed -n 's/^  *"version": *"\([^"]*\)".*/\1/p' app/tauri.conf.json | head -1)"
+          if [[ "$tag" != "$app_ver" ]]; then
+            echo "error: tag v$tag does not match app/tauri.conf.json version $app_ver" >&2
+            exit 1
+          fi
+
+      - name: Create draft release if absent
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "Draft or release $GITHUB_REF_NAME already exists; reusing it."
+          else
+            gh release create "$GITHUB_REF_NAME" --draft --verify-tag \
+              --title "Dig-the-f-up $GITHUB_REF_NAME" --notes-file - <<'NOTES'
+          Draft built from this release's tag. Review, then publish.
+
+          These builds are not signed by a paid Apple or Windows certificate, so the OS asks you to confirm the first launch.
+
+          macOS (Apple Silicon, .dmg):
+          1. Open the .dmg and drag Dig-the-f-up to Applications.
+          2. Open Dig-the-f-up from Applications once. macOS blocks it.
+          3. Open System Settings > Privacy & Security, scroll to the message about Dig-the-f-up, and click "Open Anyway". Confirm when asked.
+
+          Windows (x64, Setup .exe):
+          1. Run the Setup .exe.
+          2. On the SmartScreen screen ("Windows protected your PC"), click "More info", then "Run anyway".
+
+          Linux (x86_64):
+          - AppImage: make it executable (right-click > Properties > Allow executing the file as a program, or run chmod +x on it), then double-click it.
+          - Or install the .deb package (for Debian and Ubuntu based systems).
+
+          Verify downloads with the .sha256 files attached to this release.
+          NOTES
+          fi
+
   macos-arm64:
     name: macOS arm64 bundle
+    needs: draft
     runs-on: macos-14
     timeout-minutes: 90
+    env:
+      BACKEND: "metal"
+      GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
 
@@ -69,11 +122,15 @@ jobs:
           workspace: app
 
       - name: Install build tools
-        run: brew install cmake
+        run: brew install cmake nasm
 
       - name: Build llama.cpp (b11461 + patch, Metal)
         shell: bash
         run: scripts/build-llama.sh
+
+      - name: Build ffmpeg and ffprobe
+        shell: bash
+        run: scripts/build-ffmpeg.sh
 
       - name: Install tauri-cli
         run: cargo install tauri-cli --version '^2' --locked
@@ -81,7 +138,7 @@ jobs:
       - name: Build unsigned bundle
         if: steps.secrets.outputs.signing == 'false'
         working-directory: app
-        run: cargo tauri build --bundles app
+        run: cargo tauri build --bundles app --config tauri.release.conf.json
 
       # Tauri 2 signs during the build when the certificate variables are present and also notarizes when APPLE_ID,
       # APPLE_PASSWORD and APPLE_TEAM_ID are present. The bundler tests that a variable EXISTS, not that it is non-empty,
@@ -93,7 +150,7 @@ jobs:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-        run: cargo tauri build --bundles app
+        run: cargo tauri build --bundles app --config tauri.release.conf.json
 
       - name: Build signed and notarized bundle
         if: steps.secrets.outputs.signing == 'true' && steps.secrets.outputs.notarize == 'true'
@@ -105,7 +162,7 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        run: cargo tauri build --bundles app
+        run: cargo tauri build --bundles app --config tauri.release.conf.json
 
       - name: Verify signature and notarization ticket
         if: steps.secrets.outputs.signing == 'true'
@@ -117,40 +174,195 @@ jobs:
             xcrun stapler validate "$app"
           fi
 
-      - name: Package zip and checksum
-        id: package
+      - name: Package dmg and checksum
         shell: bash
         run: |
           set -euo pipefail
           app="app/target/release/bundle/macos/Dig-the-f-up.app"
           test -d "$app"
-          if [[ "${{ steps.secrets.outputs.signing }}" == "true" ]]; then
-            name="Dig-the-f-up-${VERSION}-macos-arm64.zip"
-          else
-            name="Dig-the-f-up-${VERSION}-macos-arm64-UNSIGNED.zip"
-          fi
+          name="Dig-the-f-up-${VERSION}-macos-arm64.dmg"
           mkdir -p dist-out
-          ditto -c -k --keepParent "$app" "dist-out/$name"
+          scripts/make-dmg.sh "$app" "dist-out/$name"
           (cd dist-out && shasum -a 256 "$name" > "$name.sha256")
           cat "dist-out/$name.sha256"
-          echo "zip=dist-out/$name" >> "$GITHUB_OUTPUT"
-          echo "sha=dist-out/$name.sha256" >> "$GITHUB_OUTPUT"
 
       - name: Upload to draft release
-        env:
-          GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
-          zip="${{ steps.package.outputs.zip }}"
-          sha="${{ steps.package.outputs.sha }}"
-          notes="Draft built from tag ${GITHUB_REF_NAME}. Review, then publish."
-          if [[ "${{ steps.secrets.outputs.signing }}" != "true" ]]; then
-            notes="$notes"$'\n\n'"UNSIGNED BUILD: macOS Gatekeeper will block it on first launch. Right-click Dig-the-f-up.app and choose Open, or run: xattr -dr com.apple.quarantine Dig-the-f-up.app"
+          gh release upload "$GITHUB_REF_NAME" dist-out/*.dmg dist-out/*.sha256 --clobber
+
+  windows-x64:
+    name: Windows x64 installer
+    needs: draft
+    runs-on: windows-latest
+    timeout-minutes: 120
+    env:
+      BACKEND: "auto"
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check tag matches app version
+        shell: bash
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          app_ver="$(sed -n 's/^  *"version": *"\([^"]*\)".*/\1/p' app/tauri.conf.json | head -1)"
+          if [[ "$tag" != "$app_ver" ]]; then
+            echo "error: tag v$tag does not match app/tauri.conf.json version $app_ver" >&2
+            exit 1
           fi
-          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release upload "$GITHUB_REF_NAME" "$zip" "$sha" --clobber
-          else
-            gh release create "$GITHUB_REF_NAME" "$zip" "$sha" --draft --verify-tag \
-              --title "Dig-the-f-up $GITHUB_REF_NAME" --notes "$notes"
+          echo "VERSION=$tag" >> "$GITHUB_ENV"
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspace: app
+
+      - name: Install build tools
+        run: choco install -y cmake llvm
+
+      - name: Cache llama.cpp build
+        uses: actions/cache@v4
+        with:
+          path: |
+            build-llama
+            vendor
+          key: llama-${{ runner.os }}-${{ runner.arch }}-native${{ env.NATIVE }}-${{ env.BACKEND }}-${{ hashFiles('scripts/build-llama.sh', 'patches/**') }}
+
+      - name: Build llama.cpp (b11461 + patch)
+        shell: bash
+        run: scripts/build-llama.sh
+
+      - name: Set up MSYS2 (MINGW64) for ffmpeg
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          path-type: inherit
+          install: make diffutils nasm mingw-w64-x86_64-gcc
+
+      - name: Build ffmpeg and ffprobe
+        shell: msys2 {0}
+        run: scripts/build-ffmpeg.sh
+
+      - name: Fetch pdfium
+        shell: bash
+        run: scripts/fetch-pdfium.sh
+
+      - name: Install tauri-cli
+        shell: bash
+        run: cargo install tauri-cli --version '^2' --locked
+
+      - name: Build NSIS installer
+        shell: bash
+        working-directory: app
+        run: >-
+          cargo tauri build --bundles nsis
+          --config tauri.release.conf.json
+          --config tauri.release.windows.conf.json
+
+      - name: Package installer and checksum
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist-out
+          src=( app/target/release/bundle/nsis/*-setup.exe )
+          test -f "${src[0]}"
+          name="Dig-the-f-up-${VERSION}-windows-x64-setup.exe"
+          cp "${src[0]}" "dist-out/$name"
+          (cd dist-out && sha256sum "$name" > "$name.sha256")
+          cat "dist-out/$name.sha256"
+
+      - name: Upload to draft release
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release upload "$GITHUB_REF_NAME" dist-out/*-setup.exe dist-out/*.sha256 --clobber
+
+  linux-x64:
+    name: Linux x86_64 packages
+    needs: draft
+    # Oldest supported Ubuntu for the widest glibc compatibility.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    env:
+      BACKEND: "auto"
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check tag matches app version
+        shell: bash
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          app_ver="$(sed -n 's/^  *"version": *"\([^"]*\)".*/\1/p' app/tauri.conf.json | head -1)"
+          if [[ "$tag" != "$app_ver" ]]; then
+            echo "error: tag v$tag does not match app/tauri.conf.json version $app_ver" >&2
+            exit 1
           fi
+          echo "VERSION=$tag" >> "$GITHUB_ENV"
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspace: app
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake clang libclang-dev nasm build-essential curl wget file \
+            libwebkit2gtk-4.1-dev libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+
+      - name: Cache llama.cpp build
+        uses: actions/cache@v4
+        with:
+          path: |
+            build-llama
+            vendor
+          key: llama-${{ runner.os }}-${{ runner.arch }}-native${{ env.NATIVE }}-${{ env.BACKEND }}-${{ hashFiles('scripts/build-llama.sh', 'patches/**') }}
+
+      - name: Build llama.cpp (b11461 + patch)
+        shell: bash
+        run: scripts/build-llama.sh
+
+      - name: Build ffmpeg and ffprobe
+        shell: bash
+        run: scripts/build-ffmpeg.sh
+
+      - name: Fetch pdfium
+        shell: bash
+        run: scripts/fetch-pdfium.sh
+
+      - name: Install tauri-cli
+        shell: bash
+        run: cargo install tauri-cli --version '^2' --locked
+
+      - name: Build AppImage and deb
+        shell: bash
+        working-directory: app
+        run: >-
+          cargo tauri build --bundles appimage,deb
+          --config tauri.release.conf.json
+          --config tauri.release.linux.conf.json
+
+      - name: Package Linux packages and checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist-out
+          appimage=( app/target/release/bundle/appimage/*.AppImage )
+          deb=( app/target/release/bundle/deb/*.deb )
+          test -f "${appimage[0]}"
+          test -f "${deb[0]}"
+          ai="Dig-the-f-up-${VERSION}-linux-x86_64.AppImage"
+          dn="Dig-the-f-up-${VERSION}-linux-amd64.deb"
+          cp "${appimage[0]}" "dist-out/$ai"
+          cp "${deb[0]}" "dist-out/$dn"
+          (cd dist-out && sha256sum "$ai" > "$ai.sha256" && sha256sum "$dn" > "$dn.sha256")
+          cat dist-out/*.sha256
+
+      - name: Upload to draft release
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release upload "$GITHUB_REF_NAME" dist-out/*.AppImage dist-out/*.deb dist-out/*.sha256 --clobber

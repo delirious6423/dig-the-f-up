@@ -13,3 +13,4 @@ baseline/
 build-ffmpeg/
 /app/binaries/ffmpeg-*
 /app/binaries/ffprobe-*
+app/pdfium/
