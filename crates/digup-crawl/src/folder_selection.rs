@@ -144,7 +144,7 @@ impl FolderSelection {
 
     /// FolderSelection.swift:104 realpath, or the path itself when it can't be resolved.
     pub fn real_path(path: &str) -> String {
-        std::fs::canonicalize(path).ok().and_then(|p| p.to_str().map(String::from)).unwrap_or_else(|| path.to_string())
+        std::fs::canonicalize(path).ok().and_then(|p| p.to_str().map(crate::crawler::unixify)).unwrap_or_else(|| path.to_string())
     }
 }
 

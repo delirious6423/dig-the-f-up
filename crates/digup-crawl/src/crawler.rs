@@ -114,6 +114,7 @@ impl Partial {
 
 /// Lexical `standardizedFileURL.path`: drop `.`/empty components, resolve `..`, no trailing slash.
 pub fn standardize(path: &str) -> String {
+    let path = &unixify(path);
     let abs = path.starts_with('/');
     let mut parts: Vec<&str> = vec![];
     for c in path.split('/') {
@@ -139,7 +140,7 @@ struct Ctx<'a> {
 }
 
 pub fn crawl<P: AsRef<Path>>(roots: &[P], options: &CrawlOptions) -> CrawlReport {
-    let roots: Vec<String> = roots.iter().map(|r| r.as_ref().to_string_lossy().into_owned()).collect();
+    let roots: Vec<String> = roots.iter().map(|r| unixify(&r.as_ref().to_string_lossy())).collect();
     let roots = &roots[..];
     if options.threads > 0 {
         if let Ok(pool) = rayon::ThreadPoolBuilder::new().num_threads(options.threads).build() { return pool.install(|| crawl_inner(roots, options)) }
@@ -303,7 +304,16 @@ fn walk_dir<'s>(ctx: &'s Ctx<'s>, dir: &Path, scope: &rayon::Scope<'s>, sink: &'
 }
 
 fn path_string(p: &Path) -> String {
-    p.to_string_lossy().into_owned()
+    unixify(&p.to_string_lossy())
+}
+
+/// Windows: `\\?\C:\a\b` becomes `C:/a/b`, so the `/`-based path logic works. Identity elsewhere.
+pub fn unixify(p: &str) -> String {
+    if cfg!(windows) {
+        p.strip_prefix(r"\\?\").unwrap_or(p).replace('\\', "/")
+    } else {
+        p.to_string()
+    }
 }
 
 fn visit_file(ctx: &Ctx, name: &str, path: &Path, out: &mut Partial) {
