@@ -3,14 +3,13 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::RecvTimeoutError;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use anyhow::Result;
 use dtfu_core::FileKind;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
-use std::sync::mpsc::RecvTimeoutError;
-use std::time::Duration;
-
 use dtfu_crawl::volume::{volume_info, VolumeInfo};
 use dtfu_crawl::{crawl, Candidate, CrawlOptions, CrawlReport};
 use dtfu_store::index::{IndexStore, NewFile};
@@ -191,7 +190,8 @@ fn check_root(store: &IndexStore, root: &Path, probe: Probe) -> Result<(Check, O
     }
 }
 
-const MTIME_TOLERANCE: f64 = 0.001;
+/// Two mtimes closer than this (seconds) count as the same date (`dtfu_store::index` uses the same tolerance).
+pub(crate) const MTIME_TOLERANCE: f64 = 0.001;
 
 /// `root` followed by the platform's separator, for prefix matching that never catches a sibling ("/ab" for "/a").
 fn dir_prefix(root: &str) -> String {

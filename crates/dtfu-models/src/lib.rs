@@ -543,7 +543,7 @@ fn env_dir(key: &str) -> Option<PathBuf> {
 }
 
 #[cfg(test)]
-mod lighton_tests {
+mod tests {
     use super::*;
 
     #[test]

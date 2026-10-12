@@ -19,6 +19,8 @@ cd app && cargo test --release         # the desktop app is a separate cargo pro
 | `DTFU_LLAMA_BUILD`, `DTFU_LLAMA_SRC` | where `dtfu-llama-sys` finds the llama.cpp build and headers |
 | `DTFU_GPU_LAYERS=0` | CPU-only run of the `bench_embed` example |
 | `DTFU_OCR` | OCR engine: `vision`, `ocrs` or `lighton` |
+| `DTFU_LIGHTON_MODELS`, `DTFU_OCR_MODELS` | folders that hold the LightOnOCR and `ocrs` model files |
+| `DTFU_PDFIUM_DIR` | folder that holds the pdfium library (Windows and Linux) |
 | `DTFU_SEARCH_TRACE=1` | timing for each search stage |
 
 ## Rules

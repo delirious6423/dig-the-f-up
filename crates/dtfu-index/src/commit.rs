@@ -29,6 +29,15 @@ fn check(vector: Vec<f32>) -> Result<Vec<f32>> {
     Ok(vector)
 }
 
+/// One checked vector per text, in order.
+fn embed_texts(embedder: &mut dyn Embed, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+    let out = embedder.embed_texts(texts)?;
+    if out.len() != texts.len() {
+        bail!("embedder returned {} vectors for {} texts", out.len(), texts.len());
+    }
+    out.into_iter().map(check).collect()
+}
+
 /// What a payload turned into: segments to add and the final state of the file.
 struct Outcome {
     segments: Vec<NewSegment>,
@@ -50,7 +59,7 @@ pub fn commit(
     opts: &IndexOptions,
 ) -> Result<()> {
     let id = prepared.job.file.id;
-    let outcome = match prepared.result {
+    let mut outcome = match prepared.result {
         Err(Leave::Skipped(why)) => skipped(&why),
         // The folder is gone or unreadable: write nothing, so the row stays pending and is retried later.
         Err(Leave::Unavailable(_)) => return Ok(()),
@@ -67,7 +76,6 @@ pub fn commit(
             },
         },
     };
-    let mut outcome = outcome;
     if prepared.job.step.is_some() && outcome.info.contains_key("scanned_pages") {
         let before = store.info(id)?;
         let prev = before.get("scanned_pages").and_then(|v| v.parse::<usize>().ok()).unwrap_or(0);
@@ -164,12 +172,8 @@ fn build(embedder: &mut dyn Embed, payload: Payload, opts: &IndexOptions) -> Res
             if !wordy.is_empty() {
                 let texts: Vec<String> =
                     wordy.iter().map(|&i| doc_prompt(Some(&title), &chunks[i].text)).collect();
-                let out = embedder.embed_texts(&texts)?;
-                if out.len() != texts.len() {
-                    bail!("embedder returned {} vectors for {} texts", out.len(), texts.len());
-                }
-                for (&i, v) in wordy.iter().zip(out) {
-                    vectors[i] = Some(check(v)?);
+                for (&i, v) in wordy.iter().zip(embed_texts(embedder, &texts)?) {
+                    vectors[i] = Some(v);
                 }
             }
             let segments = chunks
@@ -248,12 +252,8 @@ fn build(embedder: &mut dyn Embed, payload: Payload, opts: &IndexOptions) -> Res
             let mut image_vectors: Vec<Vec<f32>> = Vec::new();
             if !word_pages.is_empty() {
                 let texts: Vec<String> = word_pages.iter().map(|p| doc_prompt(Some(&title), &prefix(&p.text))).collect();
-                let out = embedder.embed_texts(&texts)?;
-                if out.len() != texts.len() {
-                    bail!("embedder returned {} vectors for {} texts", out.len(), texts.len());
-                }
-                for (p, v) in word_pages.iter().zip(out) {
-                    text_vectors.insert(p.number, check(v)?);
+                for (p, v) in word_pages.iter().zip(embed_texts(embedder, &texts)?) {
+                    text_vectors.insert(p.number, v);
                 }
             }
             for p in &image_pages {
@@ -263,13 +263,7 @@ fn build(embedder: &mut dyn Embed, payload: Payload, opts: &IndexOptions) -> Res
             if !garbled_pages.is_empty() {
                 let texts: Vec<String> =
                     garbled_pages.iter().map(|p| doc_prompt(Some(&title), &prefix(p.garbled.as_deref().unwrap_or("")))).collect();
-                let out = embedder.embed_texts(&texts)?;
-                if out.len() != texts.len() {
-                    bail!("embedder returned {} vectors for {} texts", out.len(), texts.len());
-                }
-                for v in out {
-                    garbled_vectors.push(check(v)?);
-                }
+                garbled_vectors = embed_texts(embedder, &texts)?;
             }
             let mut segments = Vec::new();
             // Meaning only: the garbled words are never shown or matched against what you type.
@@ -372,12 +366,8 @@ fn build(embedder: &mut dyn Embed, payload: Payload, opts: &IndexOptions) -> Res
             if !wordy.is_empty() {
                 let texts: Vec<String> =
                     wordy.iter().map(|&i| doc_prompt(Some(&title), &stretches[i].text)).collect();
-                let out = embedder.embed_texts(&texts)?;
-                if out.len() != texts.len() {
-                    bail!("embedder returned {} vectors for {} texts", out.len(), texts.len());
-                }
-                for (&i, v) in wordy.iter().zip(out) {
-                    vectors[i] = Some(check(v)?);
+                for (&i, v) in wordy.iter().zip(embed_texts(embedder, &texts)?) {
+                    vectors[i] = Some(v);
                 }
             }
             let kind = if cells.is_some() { SegmentKind::Cells } else { SegmentKind::Lines };

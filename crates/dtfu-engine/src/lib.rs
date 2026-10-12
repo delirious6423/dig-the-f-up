@@ -408,8 +408,8 @@ impl Inner {
     }
 }
 
-/// What follows a leading `code:` (any case), trimmed.
-fn code_query_text(query: &str) -> Option<String> {
+/// What follows a leading `code:` (any case), trimmed; `None` when the query is not a code search.
+pub fn code_query_text(query: &str) -> Option<String> {
     let t = query.trim_start();
     let head: String = t.chars().take(5).collect();
     (head.to_lowercase() == "code:").then(|| t.chars().skip(5).collect::<String>().trim().to_string())
@@ -567,8 +567,7 @@ impl Engine {
             None => (query.trim().to_string(), false),
         };
         // `ext:`, `size:` and `mtime:` terms are taken out of the text and applied to candidates before the limit.
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f64());
-        let (text, filters) = filters::parse(&text, now);
+        let (text, filters) = filters::parse(&text, Inner::now());
         let text = text.trim().to_string();
         if text.is_empty() && filters.is_empty() {
             return Ok(Vec::new());

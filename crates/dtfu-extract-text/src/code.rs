@@ -1,5 +1,5 @@
 //! Code stretches, notebooks and git-aware enumeration: a port of Swift `CodeExtractor` (CodeExtractor.swift) and of the
-//! code parts of `Rules` and `Crawler` (roadmap C6). Stretches are cut from whole lines (a notebook's from whole cells)
+//! code parts of `Rules` and `Crawler`. Stretches are cut from whole lines (a notebook's from whole cells)
 //! so that each one knows where it is and a result can open there.
 //!
 //! Character counts are Unicode grapheme clusters (`unicode-segmentation`), as Swift's `Character` counts are, so a
@@ -23,7 +23,7 @@ pub const MAX_CODE_BYTES: u64 = 1 << 20;
 /// Notebooks (with their outputs) may be larger than source (M:48).
 pub const MAX_NOTEBOOK_BYTES: u64 = 20 << 20;
 
-/// Swift `Rules.sourceExtensions` plus the code-adjacent text the code index reads (`CODE_TEXT_EXTENSIONS`).
+/// Characters at the top of a source file searched for a generator's marker (CE:54).
 const TOP_GRAPHEMES: usize = 1000;
 /// Markers a generator writes at the top of its output (CE:54).
 const MADE_BY_PROGRAM: [&str; 5] = [

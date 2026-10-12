@@ -40,8 +40,9 @@ enum Msg {
     Stop,
 }
 
-/// One notify watcher per root (keyed by root index, so roots sharing a canonical path never remove each other's), so a hung share can only block its own registration. The lock is held only
-/// for map insert/remove, never across `watch` or a watcher drop (both can block on a dead share).
+/// One notify watcher per root, keyed by root index (roots sharing a canonical path never remove each other's), so
+/// a hung share can only block its own registration. The lock is held only for map insert/remove, never across
+/// `watch` or a watcher drop (both can block on a dead share).
 type SharedNotify = Arc<Mutex<HashMap<usize, RecommendedWatcher>>>;
 
 /// Drops watchers on a detached thread: dropping one can block on a dead share.
@@ -50,6 +51,8 @@ fn drop_off_thread<T: Send + 'static>(v: T) {
         .name("dtfu-watch-drop".into())
         .spawn(move || drop(v));
 }
+
+/// Each tracked root (as given) and whether it is offline.
 type RootStatus = Arc<Mutex<Vec<(PathBuf, bool)>>>;
 
 enum PollMsg {
@@ -90,10 +93,10 @@ impl Watcher {
         // are real paths; on macOS /var is a symlink to /private/var).
         let mut fallback: Option<String> = None;
         let main_paths: Vec<PathBuf> = roots.to_vec();
-        let mut tracked: Vec<(PathBuf, bool)> = Vec::new();
+        let mut tracked: Vec<PathBuf> = Vec::new();
         for p in roots.iter().chain(cfg.code_roots.iter()) {
-            if !tracked.iter().any(|(t, _)| t == p) {
-                tracked.push((p.clone(), false));
+            if !tracked.contains(p) {
+                tracked.push(p.clone());
             }
         }
 
@@ -124,9 +127,7 @@ impl Watcher {
         };
 
         let notify: SharedNotify = Arc::new(Mutex::new(HashMap::new()));
-        let status: RootStatus = Arc::new(Mutex::new(
-            tracked.iter().map(|(p, ok)| (p.clone(), !*ok)).collect(),
-        ));
+        let status: RootStatus = Arc::new(Mutex::new(tracked.iter().map(|p| (p.clone(), true)).collect()));
         let (poll_tx, poll_rx) = mpsc::channel::<PollMsg>();
         let (ready_tx, ready_rx) = mpsc::channel::<()>();
         let poller = Poller {
@@ -135,13 +136,13 @@ impl Watcher {
             cfg: cfg.clone(),
             roots: tracked
                 .iter()
-                .map(|(p, ok)| RootState {
+                .map(|p| RootState {
                     given: p.clone(),
                     path: p.clone(),
                     epoch: Arc::new(AtomicU64::new(0)),
                     watched: false,
                     next_watch: Instant::now(),
-                    online: *ok,
+                    online: false,
                     inflight: Arc::new(AtomicBool::new(false)),
                     vol_inflight: Arc::new(AtomicBool::new(false)),
                     rec_flag: Arc::new(AtomicBool::new(false)),

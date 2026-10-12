@@ -26,6 +26,13 @@ pub struct Part {
 #[derive(Debug)]
 pub struct NotReady;
 
+impl std::fmt::Display for NotReady {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "the model is not ready")
+    }
+}
+impl std::error::Error for NotReady {}
+
 /// `meta` key: [`OCR_MISSED`] after a run found OCR unable to read, [`OCR_DONE`] once screenshots lacking OCR text
 /// were queued again with OCR working.
 const OCR_BACKFILL_KEY: &str = "ocr_backfill";
@@ -47,13 +54,6 @@ fn lighton_backfill(store: &mut IndexStore, ocr: &dyn Ocr) -> Result<()> {
     }
     Ok(())
 }
-
-impl std::fmt::Display for NotReady {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "the model is not ready")
-    }
-}
-impl std::error::Error for NotReady {}
 
 #[derive(Debug)]
 pub enum ServiceEvent {

@@ -178,7 +178,7 @@ fn crawl_inner(roots: &[String], options: &CrawlOptions) -> CrawlReport {
             .collect();
         let ctx = Ctx { opts: options, skips };
         let sink = Mutex::new(Partial::default());
-        rayon::scope(|s| walk_dir(&ctx, &root_path, s, &sink, false));
+        rayon::scope(|s| walk_dir(&ctx, &root_path, s, &sink));
         total.merge(sink.into_inner().unwrap());
     }
 
@@ -254,7 +254,7 @@ fn is_package_dir(name: &str) -> bool {
 /// Big directories split their file work across threads in chunks of this size.
 const CHUNK: usize = 512;
 
-fn walk_dir<'s>(ctx: &'s Ctx<'s>, dir: &Path, scope: &rayon::Scope<'s>, sink: &'s Mutex<Partial>, _x: bool) {
+fn walk_dir<'s>(ctx: &'s Ctx<'s>, dir: &Path, scope: &rayon::Scope<'s>, sink: &'s Mutex<Partial>) {
     let mut local = Partial::default();
     let rd = match std::fs::read_dir(dir) {
         Ok(rd) => rd,
@@ -302,7 +302,7 @@ fn walk_dir<'s>(ctx: &'s Ctx<'s>, dir: &Path, scope: &rayon::Scope<'s>, sink: &'
             continue;
         }
         let child = path.clone();
-        scope.spawn(move |s| walk_dir(ctx, &child, s, sink, false));
+        scope.spawn(move |s| walk_dir(ctx, &child, s, sink));
     }
 
     if files.len() > CHUNK {

@@ -66,14 +66,14 @@ pub fn resolve_models_dir(base: &Path) -> PathBuf {
         .unwrap_or_else(|| resolve_app_data_dir(base).join(MODELS_DIR_NAME))
 }
 
+/// Sub-folder of `<base>/Dig-the-f-up` that holds the `ocrs` models.
+pub const OCRS_DIR_NAME: &str = "ocr";
+
 /// Where the `ocrs` OCR models are downloaded: `<base>/Dig-the-f-up/ocr`, one of the folders the `ocrs` engine
-/// searches (see `dtfu-ocr`'s `ocrs_backend`). Used off macOS, where Apple Vision is the OCR engine.
+/// searches (see `dtfu-ocr`'s `ocrs_backend`). Used on Windows and Linux; macOS has Apple Vision.
 pub fn ocrs_dir() -> PathBuf {
     platform_data_dir().join(APP_DIR_NAME).join(OCRS_DIR_NAME)
 }
-
-/// Sub-folder of `<base>/Dig-the-f-up` that holds the `ocrs` models.
-pub const OCRS_DIR_NAME: &str = "ocr";
 
 /// The log folder of the desktop app: `<app data>/logs`.
 pub fn logs_dir() -> PathBuf {

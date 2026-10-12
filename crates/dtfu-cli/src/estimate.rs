@@ -96,15 +96,9 @@ impl Add for Estimate {
 }
 
 /// Estimate for a list of crawl candidates with the default costs (Estimator.estimate, Estimator.swift:66-113).
-#[allow(dead_code)]
-pub fn estimate_candidates(c: &[Candidate], opts: &IndexOptions) -> Estimate {
-    estimate_with(c, opts, &Costs::default())
-}
-
-/// `estimate_candidates` with explicit costs.
-#[allow(dead_code)]
-pub fn estimate_with(c: &[Candidate], opts: &IndexOptions, costs: &Costs) -> Estimate {
-    estimate_iter(c, opts, costs)
+#[cfg(test)]
+fn estimate_candidates(c: &[Candidate], opts: &IndexOptions) -> Estimate {
+    estimate_iter(c, opts, &Costs::default())
 }
 
 fn estimate_iter<'a>(
@@ -229,7 +223,8 @@ fn folder_string(raw: &Path) -> String {
     dtfu_crawl::crawler::standardize(&expanded)
 }
 
-fn tilde(path: &str) -> String {
+/// `path` with `$HOME` shortened to `~`.
+pub fn tilde(path: &str) -> String {
     match std::env::var("HOME") {
         Ok(home) if !home.is_empty() && path.starts_with(&home) => format!("~{}", &path[home.len()..]),
         _ => path.to_string(),

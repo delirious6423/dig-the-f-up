@@ -3,7 +3,8 @@
 use anyhow::{Context, Result};
 use dtfu_core::{query_prompt, FileKind, SegmentKind};
 use dtfu_embed::Embedder;
-use dtfu_search::{strong_count, SearchHit, SearchOptions, Searcher};
+use dtfu_engine::describe_location;
+use dtfu_search::{strong_count, SearchOptions, Searcher};
 use dtfu_store::index::{IndexStore, CODE_FILE, MAIN_FILE};
 use serde::Deserialize;
 use std::collections::{BTreeMap, HashSet};
@@ -80,37 +81,6 @@ fn metrics(ranks: &[Option<usize>]) -> (f64, f64, f64, f64) {
     (within(1), within(5), within(10), mrr)
 }
 
-fn clock(s: f64) -> String {
-    let t = s as i64;
-    format!("{}:{:02}", t / 60, t % 60)
-}
-
-pub(crate) fn location(hit: &SearchHit) -> String {
-    let Some(loc) = hit.loc else {
-        return if hit.segment == SegmentKind::Ocr { "text in image".into() } else { String::new() };
-    };
-    match hit.segment {
-        SegmentKind::Page | SegmentKind::PageImage => format!("p. {}", loc as i64),
-        SegmentKind::Audio => format!("at {} (sound)", clock(loc)),
-        SegmentKind::Frame => format!("at {}", clock(loc)),
-        SegmentKind::Chunk => format!("part {}", loc as i64),
-        SegmentKind::Lines => format!(
-            "lines {}–{}{}",
-            loc as i64,
-            hit.loc_end.unwrap_or(loc) as i64,
-            hit.focus.map(|f| format!(", opens at {}", f as i64)).unwrap_or_default()
-        ),
-        SegmentKind::Cells => {
-            if Some(loc) == hit.loc_end {
-                format!("cell {}", loc as i64)
-            } else {
-                format!("cells {}–{}", loc as i64, hit.loc_end.unwrap_or(loc) as i64)
-            }
-        }
-        _ => String::new(),
-    }
-}
-
 pub fn evaluate(args: &EvalArgs, embedder: &mut Embedder) -> Result<()> {
     let raw = std::fs::read_to_string(expand_tilde(&args.eval_file.to_string_lossy()))
         .with_context(|| format!("reading {}", args.eval_file.display()))?;
@@ -179,7 +149,7 @@ pub fn evaluate(args: &EvalArgs, embedder: &mut Embedder) -> Result<()> {
             .first()
             .map(|h| {
                 let name = Path::new(&h.path).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-                let loc = location(h);
+                let loc = describe_location(h);
                 if loc.is_empty() { name } else { format!("{name} [{loc}]") }
             })
             .unwrap_or_else(|| "-".into());
@@ -193,7 +163,6 @@ pub fn evaluate(args: &EvalArgs, embedder: &mut Embedder) -> Result<()> {
     rows.sort_by_key(|(k, _)| if k.as_str() == "ALL" { "~".to_string() } else { (*k).clone() });
     for (tag, ranks) in rows {
         let (r1, r5, r10, mrr) = metrics(ranks);
-        let mrr = mrr + 0.0;
         println!("{:<12} {:>3}  {r1:5.2}  {r5:5.2}  {r10:5.2}  {mrr:5.2}", tag, ranks.len());
     }
     let count = eval.queries.len().max(1) as f64;

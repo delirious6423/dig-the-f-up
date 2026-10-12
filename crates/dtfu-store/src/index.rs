@@ -245,7 +245,7 @@ impl IndexStore {
         for segment in segments {
             insert_segment(&tx, file_id, segment)?;
         }
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0);
+        let now = now_secs();
         tx.prepare_cached("UPDATE files SET indexed_at = max(?1, coalesce(indexed_at, 0) + 0.000001) WHERE id = ?2")?
             .execute(params![now, file_id])?;
         tx.commit()?;
@@ -261,8 +261,8 @@ impl IndexStore {
         detail: Option<&str>,
         info: &BTreeMap<String, String>,
     ) -> Result<()> {
-        let json = if info.is_empty() { None } else { Some(serde_json::to_string(info)?) };
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0);
+        let json = info_json(info)?;
+        let now = now_secs();
         let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         for segment in segments {
             insert_segment(&tx, id, segment)?;
@@ -489,8 +489,8 @@ impl IndexStore {
         detail: Option<&str>,
         info: &BTreeMap<String, String>,
     ) -> Result<()> {
-        let json = if info.is_empty() { None } else { Some(serde_json::to_string(info)?) };
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0);
+        let json = info_json(info)?;
+        let now = now_secs();
         self.conn
             .prepare_cached("UPDATE files SET state = ?1, detail = ?2, info = ?3, indexed_at = ?4 WHERE id = ?5")?
             .execute(params![state.as_str(), detail, json, now, id])?;
@@ -592,8 +592,8 @@ impl IndexStore {
             }
         }
         let detail: Option<String> = tx.query_row("SELECT detail FROM files WHERE id = ?1", [source], |r| r.get(0))?;
-        let json = if info.is_empty() { None } else { Some(serde_json::to_string(info)?) };
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0);
+        let json = info_json(info)?;
+        let now = now_secs();
         tx.prepare_cached("UPDATE files SET state = 'done', detail = ?1, info = ?2, indexed_at = ?3 WHERE id = ?4")?
             .execute(params![detail, json, now, target])?;
         tx.commit()?;
@@ -656,6 +656,16 @@ impl IndexStore {
 }
 
 // MARK: free helpers (run inside a transaction, or on a plain connection)
+
+/// Seconds since the Unix epoch, for `indexed_at`.
+fn now_secs() -> f64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0)
+}
+
+/// `info` as the JSON stored in `files.info`; an empty map stores NULL.
+fn info_json(info: &BTreeMap<String, String>) -> Result<Option<String>> {
+    Ok(if info.is_empty() { None } else { Some(serde_json::to_string(info)?) })
+}
 
 fn query_files<P: Params>(conn: &Connection, sql: &str, params: P) -> Result<Vec<FileRecord>> {
     let mut stmt = conn.prepare_cached(sql)?;

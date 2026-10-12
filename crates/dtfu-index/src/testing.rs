@@ -20,11 +20,11 @@ pub fn unit_vector(seed: &[u8]) -> Vec<f32> {
         h = (h ^ *b as u64).wrapping_mul(0x100000001b3);
     }
     let mut v = Vec::with_capacity(DIM);
-    for i in 0..DIM {
+    for _ in 0..DIM {
         h ^= h << 13;
         h ^= h >> 7;
         h ^= h << 17;
-        v.push(((h >> 11) as f64 / (1u64 << 53) as f64 - 0.5) as f32 + (i as f32) * 0.0);
+        v.push(((h >> 11) as f64 / (1u64 << 53) as f64 - 0.5) as f32);
     }
     let n = v.iter().map(|x| (*x as f64).powi(2)).sum::<f64>().sqrt() as f32;
     v.iter().map(|x| x / n).collect()

@@ -345,37 +345,36 @@ mod test_util {
         .find_map(|p| std::fs::read(p).ok().and_then(|d| FontVec::try_from_vec(d).ok()))
     }
 
-pub fn render(text: &str, font: &FontVec) -> (usize, usize, Vec<u8>) {
-    let scale = PxScale::from(140.0);
-    let sf = font.as_scaled(scale);
-    // Wide enough for the whole line plus a 30 px margin each side (a fixed width cut long strings off).
-    let advance: f32 = text.chars().map(|ch| sf.h_advance(font.glyph_id(ch))).sum();
-    let (w, h) = ((advance.ceil() as usize + 60).max(700), 240usize);
-    let mut img = vec![255u8; w * h * 3];
-    let mut x = 30.0f32;
-    let base = 170.0f32;
-    for ch in text.chars() {
-        let id = font.glyph_id(ch);
-        let g = id.with_scale_and_position(scale, ab_glyph::point(x, base));
-        x += sf.h_advance(id);
-        if let Some(o) = font.outline_glyph(g) {
-            let b = o.px_bounds();
-            o.draw(|gx, gy, c| {
-                let px = b.min.x as i32 + gx as i32;
-                let py = b.min.y as i32 + gy as i32;
-                if px >= 0 && py >= 0 && (px as usize) < w && (py as usize) < h {
-                    let i = (py as usize * w + px as usize) * 3;
-                    let v = (255.0 * (1.0 - c)) as u8;
-                    img[i] = img[i].min(v);
-                    img[i + 1] = img[i + 1].min(v);
-                    img[i + 2] = img[i + 2].min(v);
-                }
-            });
+    pub fn render(text: &str, font: &FontVec) -> (usize, usize, Vec<u8>) {
+        let scale = PxScale::from(140.0);
+        let sf = font.as_scaled(scale);
+        // Wide enough for the whole line plus a 30 px margin each side (a fixed width cut long strings off).
+        let advance: f32 = text.chars().map(|ch| sf.h_advance(font.glyph_id(ch))).sum();
+        let (w, h) = ((advance.ceil() as usize + 60).max(700), 240usize);
+        let mut img = vec![255u8; w * h * 3];
+        let mut x = 30.0f32;
+        let base = 170.0f32;
+        for ch in text.chars() {
+            let id = font.glyph_id(ch);
+            let g = id.with_scale_and_position(scale, ab_glyph::point(x, base));
+            x += sf.h_advance(id);
+            if let Some(o) = font.outline_glyph(g) {
+                let b = o.px_bounds();
+                o.draw(|gx, gy, c| {
+                    let px = b.min.x as i32 + gx as i32;
+                    let py = b.min.y as i32 + gy as i32;
+                    if px >= 0 && py >= 0 && (px as usize) < w && (py as usize) < h {
+                        let i = (py as usize * w + px as usize) * 3;
+                        let v = (255.0 * (1.0 - c)) as u8;
+                        img[i] = img[i].min(v);
+                        img[i + 1] = img[i + 1].min(v);
+                        img[i + 2] = img[i + 2].min(v);
+                    }
+                });
+            }
         }
+        (w, h, img)
     }
-    (w, h, img)
-}
-
 }
 
 #[cfg(all(test, any(not(target_os = "macos"), feature = "ocrs")))]
@@ -449,7 +448,6 @@ mod lighton_tests {
         let Some(font) = load_font() else { return };
         let (w, h, img) = render("HELLO WORLD", &font);
         let out = recognize_rgb_with(Engine::Lighton, w, h, &img).expect("some text");
-        // The test renderer's 700 px canvas clips "WORLD", so only the first word is checked.
         assert!(out.to_uppercase().contains("HELLO"), "got {out:?}");
     }
 }

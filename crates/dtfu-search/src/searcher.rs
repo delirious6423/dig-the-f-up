@@ -231,12 +231,12 @@ pub struct SearchHit {
     pub focus: Option<f64>,
 }
 
-/// The searcher's connection: borrowed for a one-shot search, owned when the searcher is cached across queries
-/// (an owned handle makes it `'static`, so the engine can keep it).
 fn data_version(conn: &Connection) -> Result<i64> {
     Ok(conn.query_row("PRAGMA data_version", [], |r| r.get(0))?)
 }
 
+/// The searcher's connection: borrowed for a one-shot search, owned when the searcher is cached across queries
+/// (an owned handle makes it `'static`, so the engine can keep it).
 enum ConnHandle<'a> {
     Borrowed(&'a Connection),
     Owned(Connection),
@@ -1291,14 +1291,6 @@ mod tests {
         assert_eq!(terms("ক্ষমা"), vec!["ক্ষমা".to_string()]);
     }
 
-    #[test]
-    fn lookup_counts_graphemes() {
-        // 3 graphemes (each base+mark) with digits: not >= 4 and no letter-check difference.
-        assert!(is_lookup(&["ab12".to_string()]));
-        assert!(is_lookup(&["1234".to_string()]));
-        assert!(!is_lookup(&["abcd".to_string()]));
-    }
-
     /// Naive reference of `Searcher.meaning`/`modalityMeans`: per-modality maps, no dense arrays.
     fn naive_meaning(scores: &[f32], modality: &[u8], sets: &[bool]) -> Vec<f64> {
         let set_rows: Vec<usize> = (0..scores.len()).filter(|&i| sets[i]).collect();
@@ -1393,6 +1385,7 @@ mod tests {
         assert!(is_lookup(&["1234".to_string()]));
         assert!(!is_lookup(&["12".to_string()]));
         assert!(!is_lookup(&["cat".to_string()]));
+        assert!(!is_lookup(&["abcd".to_string()]));
         assert!(!is_lookup(&[]));
     }
 

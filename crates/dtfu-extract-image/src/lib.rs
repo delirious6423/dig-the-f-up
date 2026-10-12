@@ -34,7 +34,7 @@ impl fmt::Display for SkipReason {
 pub enum ExtractError {
     /// Intentionally not indexed (state `skipped`).
     Skipped(SkipReason),
-    /// A format we recognise but do not decode (e.g. HEIC without the optional feature).
+    /// A format we recognise but do not decode (HEIC/HEIF, or a file over the size cap).
     Unsupported(String),
     Io(std::io::Error),
     /// Bytes could not be decoded as an image.

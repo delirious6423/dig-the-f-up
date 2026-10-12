@@ -1,8 +1,5 @@
-//! Free-space check before a model download.
-//!
-//! Uses `statvfs(3)` (unix, via the `libc` crate, which is already in the lock file through the Tauri stack), so no
-//! new download-time dependency and no parsing of `df` output. On other platforms the check is skipped: the free
-//! space is reported as unknown and the download proceeds (Windows support is not verified yet).
+//! Free-space check before a model download: `statvfs(3)` on unix. Elsewhere the free space is reported as unknown
+//! and the download proceeds.
 
 use crate::{ModelFile, DISK_MARGIN};
 use anyhow::{bail, Result};

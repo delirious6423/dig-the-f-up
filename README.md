@@ -49,8 +49,8 @@ Release packages are coming with the first tagged release. Get them from the
 
 **First start**
 
-- The app downloads what it needs on first launch: the search model (about 1 GB) and the OCR model (about 1 GB).
-  You need an internet connection for this step. After that, search runs on your computer.
+- The app downloads what it needs on first launch: the search model (865 MB) and the OCR model (about 1 GB). You
+  need an internet connection for this step. After that, search runs on your computer.
 - Video support (ffmpeg) and PDF support are included.
 
 Windows and Linux have not been checked on real machines yet (see [Status](#status-early-macos-first)).
@@ -90,9 +90,9 @@ target/release/dtfu search "a penguin on the ice"
   QuickTime Player or IINA (not yet tested against the real players).
 - Esc or closing the window hides it. Cmd+Shift+Space brings it back (Ctrl+Shift+Space on Windows and Linux).
 - New and changed files are picked up while the app runs.
-- Text in screenshots and images is searchable. The app downloads LightOnOCR-3 (about 1 GB) after the search model.
-  On Windows and Linux it reads all screenshots (until it has downloaded, two small Latin-only OCR models, 12 MB, fill
-  in). On macOS Apple Vision reads first and LightOnOCR takes over where Vision finds no text or is unsure, which
+- Text in screenshots is searchable. The app downloads LightOnOCR-3 (about 1 GB) after the search model. On Windows
+  and Linux LightOnOCR reads every screenshot; until it has downloaded, two small Latin-only OCR models (12 MB) fill
+  in. On macOS Apple Vision reads first and LightOnOCR takes over where Vision finds no text or is unsure, which
   covers scripts Vision cannot read (Hebrew, Greek, Hindi, Bengali, Tamil and others). Once LightOnOCR is installed,
   screenshots already indexed are read again once (on macOS only those where Vision found no text).
 

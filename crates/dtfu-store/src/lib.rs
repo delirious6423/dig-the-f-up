@@ -10,6 +10,7 @@ use std::time::Duration;
 
 pub mod index;
 pub mod migrate;
+pub mod scan;
 
 const DDL: &str = r#"
 CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -206,8 +207,6 @@ pub fn decode_f16(blob: &[u8]) -> Option<Vec<f16>> {
     Some(blob.as_chunks::<2>().0.iter().map(|b| f16::from_le_bytes(*b)).collect())
 }
 
-pub mod scan;
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ScanMode {
     /// One accumulator, one thread. The shape of the Swift loop.
@@ -362,8 +361,8 @@ mod tests {
 
     #[test]
     fn concurrent_opens_of_a_fresh_index_both_succeed() {
-        // Both threads start from a file with version 0: before the fix, both read 0 and the loser failed with
-        // "table meta already exists". Repeated, because the race is timing-dependent.
+        // Both threads start from a file with version 0; the loser must find the schema, not create it again.
+        // Repeated, because the race is timing-dependent.
         for round in 0..20 {
             let dir = Dir::new(&format!("race{round}"));
             let path = dir.0.join("index.sqlite");

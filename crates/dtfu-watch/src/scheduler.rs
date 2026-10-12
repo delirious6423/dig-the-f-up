@@ -11,17 +11,8 @@ use std::time::Duration;
 use crate::coalesce::{CoalesceConfig, Coalescer, Lane, Request};
 use crate::power::{allowed, PowerPolicy, PowerSource, PowerState};
 
-/// Developer folders the main index never crawls (docs/porting/spec-pipeline.md 3.4, skippedFolderNames).
-pub(crate) const MAIN_SKIP_FOLDERS: &[&str] = &[
-    "node_modules",
-    "bower_components",
-    "venv",
-    "site-packages",
-    "__pycache__",
-    "DerivedData",
-    "Pods",
-    "Carthage",
-];
+/// Developer folders the main index never crawls (the crawler's `SKIPPED_FOLDER_NAMES`).
+pub(crate) const MAIN_SKIP_FOLDERS: &[&str] = dtfu_crawl::rules::SKIPPED_FOLDER_NAMES;
 
 /// Extra folders skipped for code projects (docs/porting/spec-pipeline.md 2.8, Engine.swift codeNoise).
 pub(crate) const CODE_NOISE_FOLDERS: &[&str] = &[
@@ -81,7 +72,7 @@ impl Default for WatchConfig {
             quiet_window: Duration::from_secs(60),
             max_wait: Duration::from_secs(600),
             storm_cap: 5000,
-            resync_interval: Duration::from_secs(3600),
+            resync_interval: crate::DEFAULT_RESYNC_INTERVAL,
             power_poll: Duration::from_secs(30),
             code_roots: Vec::new(),
             availability_interval: Duration::from_secs(10),

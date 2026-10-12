@@ -2,9 +2,8 @@
 //!
 //! The model is loaded once and kept in a process-wide `Mutex` ([`recognize`]); calls are serialized, so the
 //! shared path handles ONE image at a time: with parallel indexing the OCR calls queue behind each other and OCR
-//! throughput is 1 / (seconds per image) regardless of thread count (about 0.65 images/s measured, see
-//! docs/BENCHMARKS.md OCR1). Prompt: empty (the model only follows an empty prompt or its grounding prompt),
-//! greedy decoding.
+//! throughput is 1 / (seconds per image) regardless of thread count (1.48 s per image median, docs/BENCHMARKS.md,
+//! OCR). Prompt: empty (the model only follows an empty prompt or its grounding prompt), greedy decoding.
 //!
 //! Guards: images are rejected above [`MAX_PIXELS`] and downscaled to a longest side of [`Options::max_side`]
 //! (1280 px, env `DTFU_OCR_MAX_SIDE`; the model card allows 2048, but on a Retina screenshot 1280 read as well, 0
@@ -256,9 +255,8 @@ impl LightOn {
     }
 
     unsafe fn generate(&mut self, bitmap: *mut sys::mtmd_bitmap, chunks: *mut sys::mtmd_input_chunks) -> Result<String, String> {
-        // Qwen chat format with an empty user prompt: only the image marker.
-        // The GGUF's own chat template with thinking disabled: an empty user turn holding only the image.
-        // Without the empty think block the model starts with "<think>" and a markdown image stub (measured).
+        // The GGUF's own (Qwen) chat template with thinking disabled: an empty user turn holding only the image
+        // marker. Without the empty think block the model starts with "<think>" and a markdown image stub (measured).
         let marker = CStr::from_ptr(sys::mtmd_default_marker()).to_string_lossy().into_owned();
         let prompt = format!("<|im_start|>user\n{marker}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n");
         let prompt = CString::new(prompt).map_err(|_| "prompt".to_string())?;

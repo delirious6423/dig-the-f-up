@@ -589,21 +589,19 @@ dependencies = [
 name = "dtfu-extract-pdf"
 version = "0.1.0"
 dependencies = [
+ "dtfu-text",
  "objc2",
  "objc2-core-foundation",
  "objc2-core-graphics",
  "objc2-foundation",
  "objc2-pdf-kit",
  "pdfium-render",
- "unicode-normalization",
 ]
 
 [[package]]
 name = "dtfu-extract-text"
 version = "0.1.0"
 dependencies = [
- "anyhow",
- "dtfu-core",
  "dtfu-crawl",
  "ego-tree",
  "encoding_rs",
@@ -643,10 +641,8 @@ dependencies = [
  "dtfu-extract-video",
  "dtfu-ocr",
  "dtfu-store",
- "dtfu-text",
  "image",
  "rayon",
- "serde_json",
 ]
 
 [[package]]
@@ -663,7 +659,6 @@ dependencies = [
  "anyhow",
  "dtfu-engine",
  "dtfu-index",
- "serde",
  "serde_json",
  "tempfile",
 ]
@@ -710,7 +705,6 @@ dependencies = [
  "rusqlite",
  "serde_json",
  "tempfile",
- "unicode-normalization",
  "unicode-segmentation",
 ]
 

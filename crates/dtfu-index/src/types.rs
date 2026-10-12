@@ -22,7 +22,7 @@ pub trait Embed {
     fn embed_audio_samples(&mut self, samples: &[f32]) -> Result<Vec<f32>>;
 }
 
-/// Text recognition for screenshots. macOS Vision / Windows.Media.Ocr / `ocrs` backends come later.
+/// Text recognition for screenshots (see [`SystemOcr`] for the engines).
 pub trait Ocr: Sync {
     /// `rgb` is packed RGB8. `None` means no text found or OCR unavailable.
     fn recognize(&self, width: usize, height: usize, rgb: &[u8]) -> Option<String>;

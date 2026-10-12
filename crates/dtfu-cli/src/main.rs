@@ -1,12 +1,13 @@
 //! `dtfu`: command-line front end (port of the Swift CLI, `Sources/digup/main.swift`).
-//! Commands: index, search, status. (estimate, eval, worker, index-service follow.)
+//! Commands: index, search, status, mcp, download, estimate, eval.
 
 mod estimate;
 mod eval;
 
-use anyhow::{bail, Result};
+use anyhow::{anyhow, bail, Result};
 use dtfu_core::{query_prompt, FileKind};
 use dtfu_embed::{Embedder, Options};
+use dtfu_engine::{code_query_text, describe_location};
 use dtfu_index::run::{check_model, finish_long_files, run, Event};
 use dtfu_index::sync::sync;
 use dtfu_index::{IndexOptions, SystemOcr};
@@ -16,6 +17,8 @@ use dtfu_store::index::{IndexStore, CODE_FILE, MAIN_FILE};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
+
+use estimate::tilde;
 
 struct Args {
     flags: HashSet<String>,
@@ -64,15 +67,10 @@ impl Args {
 }
 
 fn load_embedder(text_only: bool) -> Result<Embedder> {
-    let text = dtfu_models::locate(&dtfu_models::TEXT);
-    let mmproj = dtfu_models::locate(&dtfu_models::MMPROJ);
-    let Some(text) = text else {
-        bail!("model not found in {} (run `dtfu download`, or set DTFU_MODELS)", dtfu_models::models_dir().display());
-    };
-    if !text_only && mmproj.is_none() {
-        bail!("model not found in {} (run `dtfu download`, or set DTFU_MODELS)", dtfu_models::models_dir().display());
-    }
-    Embedder::new(&text, if text_only { None } else { mmproj.as_deref() }, &Options::default())
+    let missing = || anyhow!("model not found in {} (run `dtfu download`, or set DTFU_MODELS)", dtfu_models::models_dir().display());
+    let text = dtfu_models::locate(&dtfu_models::TEXT).ok_or_else(missing)?;
+    let mmproj = if text_only { None } else { Some(dtfu_models::locate(&dtfu_models::MMPROJ).ok_or_else(missing)?) };
+    Embedder::new(&text, mmproj.as_deref(), &Options::default())
 }
 
 /// `dtfu download`: fetches the model files that are missing (resumable): the two embedding models into the models
@@ -117,13 +115,6 @@ fn cmd_download() -> Result<()> {
         println!("{}: saved to {}", file.name, path.display());
     }
     Ok(())
-}
-
-fn tilde(p: &str) -> String {
-    match std::env::var("HOME") {
-        Ok(h) if p.starts_with(&h) => format!("~{}", &p[h.len()..]),
-        _ => p.to_string(),
-    }
 }
 
 fn states_line(states: &std::collections::BTreeMap<String, usize>) -> String {
@@ -171,13 +162,6 @@ fn cmd_index(args: &Args) -> Result<()> {
         );
     }
     Ok(())
-}
-
-/// What follows a leading `code:` (any case), trimmed; `None` when the query is not a code search (Swift `CodeQuery`).
-fn code_query_text(query: &str) -> Option<String> {
-    let t = query.trim_start();
-    let head: String = t.chars().take(5).collect();
-    (head.to_lowercase() == "code:").then(|| t.chars().skip(5).collect::<String>().trim().to_string())
 }
 
 fn cmd_search(args: &Args) -> Result<()> {
@@ -256,7 +240,7 @@ fn cmd_search(args: &Args) -> Result<()> {
             .join(", ");
         let path = Path::new(&hit.path);
         let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        let place = Some(eval::location(hit)).filter(|p| !p.is_empty()).map(|p| format!("  [{p}]")).unwrap_or_default();
+        let place = Some(describe_location(hit)).filter(|p| !p.is_empty()).map(|p| format!("  [{p}]")).unwrap_or_default();
         println!("{:>2}. {:<10} {}{}   ({})", rank + 1, hit.kind.as_str(), name, place, why);
         println!("      {}", tilde(&path.parent().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default()));
         if let Some(e) = hit.excerpt.as_deref().filter(|e| !e.is_empty()) {
@@ -341,6 +325,6 @@ fn main() -> Result<()> {
             let mut embedder = load_embedder(true)?;
             eval::evaluate(&a, &mut embedder)
         }
-        other => bail!("unknown command {other} (commands: index, search, status, eval, estimate, download)"),
+        other => bail!("unknown command {other} (commands: index, search, status, mcp, eval, estimate, download)"),
     }
 }

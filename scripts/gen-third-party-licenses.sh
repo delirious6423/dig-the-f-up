@@ -30,7 +30,6 @@ render() {
   printf '%s' "$meta" | python3 -I -c '
 import json, sys
 meta = json.load(sys.stdin)
-pkgs = {p["id"]: p for p in meta["packages"]}
 # Skip this project: workspace members and local path dependencies have no registry or git "source".
 rows = []
 for p in meta["packages"]:

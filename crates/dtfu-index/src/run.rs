@@ -1,13 +1,12 @@
 //! The pipeline loop: prepare on all cores (rayon, bounded channel) while one thread embeds and commits.
 //! Port of Swift `Indexer.run` / `finishLongFiles` / `process` (Indexer.swift:139-260), with more prepare parallelism.
 
-use crate::commit::commit;
+use crate::commit::{commit, CONTENT_HASH, CONTENT_SIZE};
 use crate::options::IndexOptions;
 use crate::prepare::prepare;
+use crate::sync::MTIME_TOLERANCE;
 use crate::types::{Embed, Job, Leave, Ocr, Prepared};
 use anyhow::Result;
-use crate::commit::CONTENT_HASH;
-use crate::commit::CONTENT_SIZE;
 use dtfu_store::index::{Adoption, FileRecord, IndexStore, Mismatch};
 use rayon::prelude::*;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -15,9 +14,6 @@ use std::path::Path;
 use std::sync::mpsc::{sync_channel, RecvTimeoutError};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, UNIX_EPOCH};
-
-/// Mtime tolerance used by sync (sync.rs `MTIME_TOLERANCE`).
-const MTIME_TOLERANCE: f64 = 0.001;
 
 /// One file (or one step of a long file) finished.
 #[derive(Debug, Clone)]
@@ -583,8 +579,8 @@ fn process(
             };
             if state == "pending" || unavailable {
                 // Commit left the row alone (folder unavailable; a `partial` row stays `partial`): not settled, so it is
-                // retried in a later run, never done or failed. Its
-                // remaining steps are skipped for the rest of this run, and it is not counted as done or failed.
+                // retried in a later run. Its remaining steps are skipped for the rest of this run, and it is not
+                // counted as done or failed.
                 state = "unavailable".into();
                 note = Some("folder unavailable, stays pending".into());
                 finished.insert(file.id);
@@ -676,7 +672,7 @@ mod tests {
     #[test]
     fn indexes_pending_then_finishes_long_doc() {
         let root = temp("e2e");
-        let paragraphs: Vec<String> = (0..120).map(|i| format!("Paragraph {i}: ").repeat(1) + &"the quick brown fox jumps. ".repeat(40)).collect();
+        let paragraphs: Vec<String> = (0..120).map(|i| format!("Paragraph {i}: ") + &"the quick brown fox jumps. ".repeat(40)).collect();
         std::fs::write(root.join("long.txt"), paragraphs.join("\n\n")).unwrap();
         std::fs::write(root.join("short.txt"), "A short note about penguins and their habitat.").unwrap();
         let img = image::RgbImage::from_fn(600, 400, |x, y| image::Rgb([(x % 256) as u8, (y % 256) as u8, 90]));

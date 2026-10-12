@@ -10,7 +10,6 @@ use dtfu_extract_text::code::{self, CodeOptions, CodeOutcome};
 use dtfu_extract_text::docs::{self, DocError};
 use std::path::Path;
 
-/// Prepare one job. Per-file errors become `Leave`, never a panic.
 /// blake3 of a file's bytes as lowercase hex, read in 1 MiB chunks so large files never sit in memory.
 pub fn content_hash(path: &Path) -> std::io::Result<String> {
     use std::io::Read;
@@ -27,6 +26,7 @@ pub fn content_hash(path: &Path) -> std::io::Result<String> {
     Ok(hasher.finalize().to_hex().to_string())
 }
 
+/// Prepares one job. Per-file errors become `Leave`, never a panic.
 pub fn prepare(job: &Job, opts: &IndexOptions, ocr: &dyn Ocr) -> Prepared {
     let path = Path::new(&job.file.path);
     let result = match job.file.kind {
@@ -145,8 +145,7 @@ fn prepare_pdf(job: &Job, opts: &IndexOptions, path: &Path, ocr: &dyn Ocr) -> Re
     let range = wanted.start.min(end)..end;
     let mut pages = Vec::new();
     for index in range.clone() {
-        let text = doc.text(index).unwrap_or_default().trim().to_string();
-        let mut text = text;
+        let mut text = doc.text(index).unwrap_or_default().trim().to_string();
         let mut garbled = None;
         match page_text_problem(&text).as_deref() {
             Some("lostLetters") => {
@@ -184,20 +183,16 @@ fn prepare_pdf(job: &Job, opts: &IndexOptions, path: &Path, ocr: &dyn Ocr) -> Re
 
 fn prepare_video(opts: &IndexOptions, path: &Path) -> Result<Payload, Leave> {
     use dtfu_extract_video::{frames, probe, VideoError};
-    let info = probe(path).map_err(|e| failed_or_unavailable(path, match e {
+    let message = |e: VideoError| match e {
         VideoError::Missing => "ffmpeg not found".to_string(),
         VideoError::Unreadable(m) => m,
-    }))?;
+    };
+    let info = probe(path).map_err(|e| failed_or_unavailable(path, message(e)))?;
     // Swift keeps going with the sound when no frame can be read.
     let frames = match frames(path, opts.frame_interval, 1024) {
         Ok(f) => f,
         Err(_) if info.has_audio => Vec::new(),
-        Err(e) => {
-            return Err(failed_or_unavailable(path, match e {
-                VideoError::Missing => "ffmpeg not found".to_string(),
-                VideoError::Unreadable(m) => m,
-            }))
-        }
+        Err(e) => return Err(failed_or_unavailable(path, message(e))),
     };
     let mut kept: Vec<VideoFrame> = frames
         .into_iter()

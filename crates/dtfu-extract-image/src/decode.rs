@@ -1,5 +1,5 @@
 //! Decode once, apply EXIF orientation, decide screenshot, thumbnail.
-//! Thumbnails use fast_image_resize (Lanczos3); the embedder-input resize is elsewhere (D4).
+//! Thumbnails use fast_image_resize (Lanczos3); the embedder-input resize is `dtfu_embed::sizing`.
 
 use std::io::{Cursor, Read};
 use std::path::Path;

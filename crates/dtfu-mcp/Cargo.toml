@@ -8,7 +8,6 @@ rust-version.workspace = true
 [dependencies]
 anyhow = { workspace = true }
 dtfu-engine = { path = "../dtfu-engine" }
-serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 [dev-dependencies]

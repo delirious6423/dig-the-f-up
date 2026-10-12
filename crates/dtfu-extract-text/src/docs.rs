@@ -1,4 +1,4 @@
-//! Document readers and 1800-char chunker (roadmap C3).
+//! Document readers and the 1800-character chunker.
 //!
 //! Port of `DocExtractor` (reference/digup-swift/Sources/DigUpKit/Extractors.swift:161-246) and the
 //! `SearchText.hasWords` gate (SearchText.swift:37-43).
