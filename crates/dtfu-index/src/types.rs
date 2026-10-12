@@ -120,7 +120,7 @@ pub struct Prepared {
 
 #[cfg(feature = "llama")]
 impl Embed for dtfu_embed::Embedder {
-    /// A tag distinct from the Swift app's (HANDOFF section 11): Rust-made indexes never mix with Swift-made ones.
+    /// A tag distinct from the Swift app's: Rust-made indexes never mix with Swift-made ones.
     fn vector_source(&self) -> String {
         "dig-the-f-up llama.cpp b11461 embeddinggemma-2 q8_0".to_string()
     }

@@ -1,58 +1,74 @@
 # Dig-the-f-up
 
-Search your files by what is in them, not by their names. Photos, screenshots, PDFs, documents, audio, video and
-code all go into one on-device index built with Google DeepMind's EmbeddingGemma 2. Ask "the receipt from the
-hardware store" or "a penguin on the ice" and get the file, the page or the moment. Nothing leaves your machine.
+Find your files by what is in them. Photos, screenshots, PDFs, documents, audio, video and code go into one
+on-device index. Type "the receipt from the hardware store" or "a penguin on the ice" and get the file, the page or
+the moment.
 
-Dig-the-f-up is a performance-first Rust port of [DigUp](https://github.com/ARahim3/DigUp) by Abdur Rahim (Swift,
-macOS only), aiming at macOS (Apple Silicon), Windows and Linux. The name nods to the f-tools that inspired the
-speed work (fff, fsearch and friends).
+Everything runs on your machine with Google DeepMind's EmbeddingGemma 2. Nothing is uploaded; the only network use is
+the one-time model download (865 MB).
+
+Dig-the-f-up is a fast Rust port of [DigUp](https://github.com/ARahim3/DigUp) by Abdur Rahim (Swift, macOS only), built
+to run on macOS, Windows and Linux. The name nods to the f-tools that inspired the speed work (fff, fsearch and friends).
 
 ## Status: early, macOS first
 
-What works on an Apple Silicon Mac:
-- The `dtfu` CLI: `index`, `search`, `status`, `eval`, `estimate`, `download`, `mcp` (a read-only MCP server for AI
-  agents).
-- Search quality equal to the original. On DigUp's own eval sets (synthetic, multilingual, code) the scores match the
-  Swift app, and all 126 eval queries return the same top-10 order on the same index. Embeddings match the Swift app
-  at cosine >= 0.999999 (Metal).
-- A desktop app (Tauri 2) in `app/`: search as you type, kind filters, thumbnails, open a PDF at the matching page,
-  folders, model download, live re-indexing. It is an unsigned build for now.
+- **macOS (Apple Silicon):** works. The CLI and desktop app run end to end with Metal. There is no signed release yet,
+  so you build it yourself.
+- **Windows and Linux:** they build and pass the unit tests in CI, but have not been verified on real machines
+  ([#1](https://github.com/delirious6423/dig-the-f-up/issues/1), [#2](https://github.com/delirious6423/dig-the-f-up/issues/2)).
 
-Not done yet:
-- Windows and Linux have only been through compile checks and the unit tests in CI. The PDF (pdfium) and OCR (ocrs)
-  backends for those platforms have never run against the real libraries.
-- There are no signed or notarized macOS releases.
+Search quality matches the original. On DigUp's own eval sets the scores are equal, and all 126 eval queries return the
+same top 10 on the same index. Speed numbers are in [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md).
 
-Measured numbers, machines and commands are in [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md). Some highlights (M4 Mac):
-- Vector scan: about 100 GB/s with NEON.
-- Keyword stage at 1M segments: 138 ms, down from 7.5 s.
-- First index of the 88-file test corpus: 31.4 s against the Swift app's 38.8 s (one run).
-- A cold one-shot CLI query is still slower than Swift: 0.60 s against 0.45 s. The desktop app keeps the model
-  loaded instead.
+## Build and run (Apple Silicon Mac)
 
-## Try it (Apple Silicon Mac)
+You need Rust, CMake (`brew install cmake`) and, for video, ffmpeg (`brew install ffmpeg`).
 
 ```bash
-scripts/link-models.sh && scripts/build-llama.sh   # once: finds/verifies the two GGUF files, builds llama.cpp with Metal
+git clone https://github.com/delirious6423/dig-the-f-up && cd dig-the-f-up
+scripts/build-llama.sh                  # once, 5-15 min: builds llama.cpp with Metal
+```
+
+Desktop app:
+
+```bash
+cd app && cargo run --release           # or build a .app: cargo install tauri-cli && cargo tauri build --bundles app
+```
+
+On first start it offers to download the model, then you add folders with the gear button.
+
+Command line:
+
+```bash
 cargo build --release -p dtfu-cli
-target/release/dtfu download                       # or set DTFU_MODELS to a folder that has them
+target/release/dtfu download            # the model, once
 target/release/dtfu index ~/Documents
 target/release/dtfu search "a penguin on the ice"
 ```
 
-The desktop app: see [`app/README.md`](app/README.md).
+## Using the app
 
-## Working on it
+- Type to search. Up/Down select, Enter opens, Cmd+Enter (or Cmd+click) shows the file in Finder.
+- Filter by kind with the chips: screenshots, images, PDFs, docs, audio, video.
+- A PDF hit opens at its page with the matching words searched. Audio and video hits are meant to jump to the moment in
+  QuickTime Player or IINA (not yet tested against the real players).
+- Esc or closing the window hides it. Cmd+Shift+Space brings it back (Ctrl+Shift+Space on Windows and Linux).
+- New and changed files are picked up while the app runs.
 
-- [`docs/HANDOFF.md`](docs/HANDOFF.md): goal, state, decisions and roadmap.
-- [`CLAUDE.md`](CLAUDE.md): how to work on the repo.
-- `docs/spec-*.md`: the behaviour being ported, with `file:line` citations into the original. Fetch that source with
-  `scripts/fetch-reference.sh`.
-- `cargo test --workspace --release` runs everything, including the embedding parity test when the models are
-  present.
+## Your data
+
+Everything lives in `~/Library/Application Support/Dig-the-f-up/`: the index, your folder list, the model files and a
+small local log (Help > Show Logs). The CLI keeps its index in `~/.dtfu`. If the original DigUp app is installed,
+its downloaded model in `~/Library/Application Support/DigUp/Models` is reused.
+
+To uninstall, quit the app, delete it, and delete `~/Library/Application Support/Dig-the-f-up/` (and `~/.dtfu` if you
+used the CLI).
+
+## Contributing
+
+See [`CONTRIBUTING.md`](CONTRIBUTING.md). Open work is tracked in [issues](https://github.com/delirious6423/dig-the-f-up/issues).
 
 ## Licence
 
-Apache License 2.0, see `LICENSE`. Dig-the-f-up is based on DigUp (MIT) and links llama.cpp (MIT). The embedding model is
-EmbeddingGemma 2 and has its own terms. See `NOTICE` and `docs/THIRD-PARTY.md`.
+Apache License 2.0, see [`LICENSE`](LICENSE). Based on DigUp (MIT) and llama.cpp (MIT); EmbeddingGemma 2 is under
+Apache 2.0. See [`NOTICE`](NOTICE) and [`docs/THIRD-PARTY.md`](docs/THIRD-PARTY.md).

@@ -18,7 +18,7 @@ fn main() {
     for b in ["ggml-cuda", "ggml-vulkan", "ggml-metal", "ggml-blas", "ggml-hip"] {
         dirs.push(build.join("ggml/src").join(b));
     }
-    // MSVC / Xcode generators put libraries under a per-config subfolder (UNTESTED on Windows; see docs/HANDOFF.md).
+    // MSVC / Xcode generators put libraries under a per-config subfolder (UNTESTED on Windows; issue #1).
     let extra: Vec<PathBuf> = dirs.iter().map(|d| d.join("Release")).collect();
     dirs.extend(extra);
     for d in &dirs {

@@ -1,7 +1,7 @@
 //! The one data-directory story for Dig-the-f-up (macOS: everything lives under
 //! `~/Library/Application Support/Dig-the-f-up`).
 //!
-//! Final layout (see `app/README.md`, "Data"):
+//! Final layout (see README.md, "Your data"):
 //! - `<base>/Dig-the-f-up/index/`, `<base>/Dig-the-f-up/settings.json`: the desktop app's index and folder list
 //! - `<base>/Dig-the-f-up/Models/`: the two GGUF model files
 //! - `<base>/Dig-the-f-up/logs/dtfu.log` (+ `dtfu.log.1` after rotation): the desktop app's local log

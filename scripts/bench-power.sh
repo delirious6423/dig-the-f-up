@@ -3,7 +3,7 @@
 #
 # Run it yourself in a Terminal window (powermetrics needs root):
 #   sudo scripts/bench-power.sh OUT_DIR [LABEL] [SAMPLES]
-# Full procedure, comparison matrix and table template: docs/POWER-BENCHMARK.md
+# Procedure and comparison matrix: issue #10 (the full write-up is in git history, docs/POWER-BENCHMARK.md).
 #
 # Scenarios (run in this order unless SCENARIOS says otherwise):
 #   idle   the app is open with the watcher on and nothing changes in the watched folders
