@@ -66,12 +66,16 @@ pub fn models_dir() -> PathBuf {
 
 /// The pinned revision's folder in the Hugging Face cache: `$HF_HUB_CACHE`, else `$HF_HOME/hub`, else
 /// `~/.cache/huggingface/hub`, then `models--<org>--<repo>/snapshots/<revision>`.
-fn hf_snapshot_dir() -> Option<PathBuf> {
-    let hub = env_dir("HF_HUB_CACHE")
+fn hf_hub_dir() -> Option<PathBuf> {
+    env_dir("HF_HUB_CACHE")
         .or_else(|| env_dir("HF_HOME").map(|home| home.join("hub")))
         .or_else(|| {
             dirs::home_dir().map(|home| home.join(".cache").join("huggingface").join("hub"))
-        })?;
+        })
+}
+
+fn hf_snapshot_dir() -> Option<PathBuf> {
+    let hub = hf_hub_dir()?;
     Some(
         hub.join(format!("models--{}", REPOSITORY.replace('/', "--")))
             .join("snapshots")
@@ -95,6 +99,54 @@ pub fn locate(file: &ModelFile) -> Option<PathBuf> {
     candidates
         .into_iter()
         .find(|path| has_size(path, file.bytes))
+}
+
+/// Environment variable that replaces the LightOnOCR model folder lookup (the files sit directly in it).
+pub const LIGHTON_ENV: &str = "DIGUP_LIGHTON_MODELS";
+/// Community GGUF conversion of lightonai/LightOnOCR-3-0.8B (Apache-2.0); lightonai publishes safetensors only.
+pub const LIGHTON_REPOSITORY: &str = "mradermacher/LightOnOCR-3-0.8B-GGUF";
+/// Pinned revision of [`LIGHTON_REPOSITORY`].
+pub const LIGHTON_REVISION: &str = "d76992384e501892b4e37bd55020d762d30b5b37";
+
+/// LightOnOCR-3-0.8B language model, Q8_0 (812 MB).
+pub const LIGHTON_TEXT: ModelFile = ModelFile {
+    name: "LightOnOCR-3-0.8B.Q8_0.gguf",
+    bytes: 811_844_128,
+    sha256: "b2955ffcce11b0c1fce6dd38d5303a0f3284161c48ade7f62bda9804ce5ba4f7",
+};
+
+/// LightOnOCR-3-0.8B vision projector, F16 (205 MB).
+pub const LIGHTON_MMPROJ: ModelFile = ModelFile {
+    name: "LightOnOCR-3-0.8B.mmproj-f16.gguf",
+    bytes: 204_987_200,
+    sha256: "c70a0eeee9bf2c2626510631a4c707321d48a91f577673304dd8771f2664f9d2",
+};
+
+/// Folder URL of the pinned LightOnOCR revision; pass it as `base_url` to [`download`].
+pub fn lighton_base_url() -> String {
+    format!("https://huggingface.co/{LIGHTON_REPOSITORY}/resolve/{LIGHTON_REVISION}")
+}
+
+/// Finds a present copy of a LightOnOCR file (size must match). With `$DIGUP_LIGHTON_MODELS` set only that folder
+/// is searched; otherwise `<models_dir>/lightonocr` (and `$DIGUP_MODELS/lightonocr`), then the Hugging Face
+/// snapshot of the pinned revision.
+pub fn locate_lighton(file: &ModelFile) -> Option<PathBuf> {
+    let candidates: Vec<PathBuf> = match env_dir(LIGHTON_ENV) {
+        Some(dir) => vec![dir.join(file.name)],
+        None => {
+            let mut v = vec![models_dir().join("lightonocr").join(file.name)];
+            if let Some(hub) = hf_hub_dir() {
+                v.push(
+                    hub.join(format!("models--{}", LIGHTON_REPOSITORY.replace('/', "--")))
+                        .join("snapshots")
+                        .join(LIGHTON_REVISION)
+                        .join(file.name),
+                );
+            }
+            v
+        }
+    };
+    candidates.into_iter().find(|path| has_size(path, file.bytes))
 }
 
 /// Checks that `path` is a file of exactly `bytes` bytes. Symlinks are followed.
