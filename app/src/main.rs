@@ -168,6 +168,31 @@ fn model_ok() -> bool {
     dtfu_models::locate(&dtfu_models::TEXT).is_some() && dtfu_models::locate(&dtfu_models::MMPROJ).is_some()
 }
 
+/// Off macOS, OCR (text in screenshots) runs on the `ocrs` engine, whose two small model files (12 MB) are fetched
+/// here; the engine picks them up within 30 s. A failure only costs OCR, so it is logged and not shown. On macOS
+/// Apple Vision needs no files and this does nothing.
+fn fetch_ocr_models() {
+    if cfg!(target_os = "macos") || dtfu_models::ocrs_present() {
+        return;
+    }
+    static RUNNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if RUNNING.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
+    std::thread::spawn(|| {
+        // Its own flag: the "cancel download" button stops the large model download, not this 12 MB one.
+        let never = std::sync::atomic::AtomicBool::new(false);
+        match dtfu_models::download_ocrs(&never, &mut |_, _, _| {}) {
+            Ok(_) => logging::info("OCR models downloaded"),
+            Err(e) if dtfu_models::is_cancelled(&e) => {}
+            // `dtfu download` is fetching them right now; it finishes the job.
+            Err(e) if format!("{e:#}").contains("in progress") => logging::info(&format!("OCR models: {e:#}")),
+            Err(e) => logging::error(&format!("OCR model download failed: {e:#}")),
+        }
+        RUNNING.store(false, std::sync::atomic::Ordering::SeqCst);
+    });
+}
+
 #[tauri::command]
 async fn search(engine: Eng<'_>, query: String, limit: Option<usize>, kinds: Option<Vec<String>>) -> Res<Vec<HitDto>> {
     // Model load and inference take hundreds of ms: keep them off the main thread.
@@ -362,6 +387,7 @@ fn download_models(app: AppHandle) -> Res<()> {
                 if let Some(engine) = app.try_state::<Arc<Engine>>() {
                     let _ = engine.start_indexing();
                 }
+                fetch_ocr_models();
             }
             Err(e) if dtfu_models::is_cancelled(&e) => {
                 logging::info("model download cancelled; partial files kept");
@@ -628,6 +654,10 @@ fn main() {
                 if let Err(e) = engine.start_indexing() {
                     logging::error(&format!("start_indexing: {e:#}"));
                 }
+            }
+            // Installs whose embedding models came before OCR models were downloaded get them now.
+            if model_ok() {
+                fetch_ocr_models();
             }
             app.manage(engine);
 

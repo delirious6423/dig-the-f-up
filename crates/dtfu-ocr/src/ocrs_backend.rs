@@ -1,9 +1,9 @@
 //! OCR via the pure-Rust `ocrs` engine (rten models). Compiled on every non-macOS
 //! target, and on macOS only with `--features ocrs`.
 //!
-//! Model files are NOT downloaded by this crate. The owner fetches them once from
-//! the ocrs-models repository (https://github.com/robertknight/ocrs-models, linked
-//! from the ocrs README) and places them in one of these directories:
+//! Model files are not downloaded by this crate: the desktop app and `dtfu download` fetch them (pinned by size and
+//! SHA-256 in `dtfu-models`, `OCRS_FILES`) into the data-dir folder below. They come from the ocrs-models bucket
+//! (https://github.com/robertknight/ocrs-models, linked from the ocrs README). The engine looks in:
 //!
 //! 1. `$DTFU_OCR_MODELS` (a directory),
 //! 2. `<dir of the executable>/models/ocr/`,
@@ -18,14 +18,16 @@
 //!   <https://ocrs-models.s3-accelerate.amazonaws.com/text-recognition.rten>
 //!
 //! e.g. `curl -LO https://ocrs-models.s3-accelerate.amazonaws.com/text-detection.rten`.
-//! The first directory that contains both files wins. If none does, OCR is disabled:
-//! a single note is printed to stderr and every call returns `None`. Nothing panics.
+//! The first directory that contains both files wins. If none does, calls return `None` (a single note is printed
+//! to stderr) and loading is retried every 30 s, so models downloaded while the app runs are picked up. Nothing
+//! panics.
 //!
 //! The engine is loaded lazily on first use and cached in a `OnceLock`.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use ocrs::{ImageSource, OcrEngine, OcrEngineParams};
 use rten::Model;
@@ -37,7 +39,40 @@ pub const DETECTION_MODEL: &str = "text-detection.rten";
 /// Recognition model file name.
 pub const RECOGNITION_MODEL: &str = "text-recognition.rten";
 
-static ENGINE: OnceLock<Option<OcrEngine>> = OnceLock::new();
+static ENGINE: OnceLock<OcrEngine> = OnceLock::new();
+/// When loading last failed. The app downloads the models in the background, so a failed load is retried (at most
+/// once per [`RETRY_EVERY`]) instead of disabling OCR until the next launch.
+static LAST_FAILURE: Mutex<Option<Instant>> = Mutex::new(None);
+const RETRY_EVERY: Duration = Duration::from_secs(30);
+
+/// True when the engine is loaded or can be loaded now (it is loaded by this call).
+pub fn ready() -> bool {
+    engine().is_some()
+}
+
+/// The loaded engine, loading it on first use or after [`RETRY_EVERY`] since the last failed attempt.
+fn engine() -> Option<&'static OcrEngine> {
+    if let Some(e) = ENGINE.get() {
+        return Some(e);
+    }
+    let mut last = LAST_FAILURE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(e) = ENGINE.get() {
+        return Some(e); // loaded by another thread while this one waited
+    }
+    if last.is_some_and(|t| t.elapsed() < RETRY_EVERY) {
+        return None;
+    }
+    match init_engine(last.is_none()) {
+        Some(e) => {
+            *last = None;
+            Some(ENGINE.get_or_init(|| e))
+        }
+        None => {
+            *last = Some(Instant::now());
+            None
+        }
+    }
+}
 
 /// Recognize text in a packed RGB8 image. Returns lines joined by "\n", or `None`
 /// if the image is empty, the engine is unavailable, or no text was found.
@@ -46,7 +81,7 @@ pub fn recognize(width: usize, height: usize, rgb: &[u8]) -> Option<String> {
     if n == 0 || rgb.len() < n.checked_mul(3)? {
         return None;
     }
-    let engine = ENGINE.get_or_init(init_engine).as_ref()?;
+    let engine = engine()?;
     let w = u32::try_from(width).ok()?;
     let h = u32::try_from(height).ok()?;
     let src = ImageSource::from_bytes(&rgb[..n * 3], (w, h)).ok()?;
@@ -100,8 +135,12 @@ pub fn models_available() -> bool {
     default_model_dir().is_some()
 }
 
-fn init_engine() -> Option<OcrEngine> {
+/// `first`: report a missing model folder (only on the first attempt; later retries stay quiet).
+fn init_engine(first: bool) -> Option<OcrEngine> {
     let Some(dir) = default_model_dir() else {
+        if !first {
+            return None;
+        }
         eprintln!(
             "dtfu-ocr: ocrs models not found; OCR disabled. Set {MODELS_ENV} or place \
              {DETECTION_MODEL} and {RECOGNITION_MODEL} in models/ocr/ next to the binary \
@@ -112,7 +151,9 @@ fn init_engine() -> Option<OcrEngine> {
     match load_engine(&dir) {
         Ok(engine) => Some(engine),
         Err(e) => {
-            eprintln!("dtfu-ocr: failed to load ocrs models from {}: {e}; OCR disabled", dir.display());
+            if first {
+                eprintln!("dtfu-ocr: failed to load ocrs models from {}: {e}; OCR disabled for now", dir.display());
+            }
             None
         }
     }

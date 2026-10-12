@@ -7,6 +7,7 @@ use crate::run::{self, check_model, finish_long_files};
 use crate::sync::{sync, SyncSummary};
 use crate::types::{Embed, Ocr};
 use anyhow::Result;
+use dtfu_core::{FileKind, SegmentKind};
 use dtfu_store::index::IndexStore;
 use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex};
@@ -24,6 +25,12 @@ pub struct Part {
 /// Returned (as an `anyhow` error) by the embedder factory when the model is not downloaded or loaded yet.
 #[derive(Debug)]
 pub struct NotReady;
+
+/// `meta` key: [`OCR_MISSED`] after a run found OCR unable to read, [`OCR_DONE`] once screenshots lacking OCR text
+/// were queued again with OCR working.
+const OCR_BACKFILL_KEY: &str = "ocr_backfill";
+const OCR_MISSED: &str = "missed";
+const OCR_DONE: &str = "done";
 impl std::fmt::Display for NotReady {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "the model is not ready")
@@ -195,6 +202,23 @@ impl Service {
             if part.keep_only {
                 let removed = part.store.prune(&root_strings(&part.roots))?;
                 on_event(ServiceEvent::Pruned { code: part.code, removed });
+            }
+        }
+        // Screenshots indexed while OCR could not read (Windows and Linux had no OCR models before they were
+        // downloaded automatically) have no OCR text: once OCR works, queue them again, once per index. On macOS
+        // Vision always worked, so screenshots without OCR text there simply have none and are left alone.
+        let store = &mut self.main.store;
+        if !ocr.ready() {
+            store.set_meta(OCR_BACKFILL_KEY, Some(OCR_MISSED))?;
+        } else {
+            match store.meta(OCR_BACKFILL_KEY)?.as_deref() {
+                Some(OCR_DONE) => {}
+                missed => {
+                    if missed == Some(OCR_MISSED) || !cfg!(target_os = "macos") {
+                        store.requeue_lacking(FileKind::Screenshot, SegmentKind::Ocr)?;
+                    }
+                    store.set_meta(OCR_BACKFILL_KEY, Some(OCR_DONE))?;
+                }
             }
         }
 

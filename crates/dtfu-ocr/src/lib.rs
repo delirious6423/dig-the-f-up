@@ -77,6 +77,17 @@ impl Engine {
     }
 }
 
+/// Whether [`recognize_rgb`] can read text now. False only when its engine is `ocrs` (the default off macOS) and its
+/// model files are not there yet; Vision needs no files and LightOn falls back to the platform default.
+pub fn ready() -> bool {
+    let engine = if Engine::from_env().is_compiled() { Engine::from_env() } else { Engine::platform_default() };
+    match engine {
+        #[cfg(any(not(target_os = "macos"), feature = "ocrs"))]
+        Engine::Ocrs => ocrs_backend::ready(),
+        _ => true,
+    }
+}
+
 /// Recognize text in a packed RGB8 image (`rgb.len() >= width*height*3`).
 /// Returns recognized lines joined by "\n", or `None` if nothing was found.
 /// Uses the engine named by `$DTFU_OCR` ([`Engine::from_env`]); by default Apple Vision on macOS and `ocrs`
@@ -278,10 +289,12 @@ mod test_util {
     }
 
 pub fn render(text: &str, font: &FontVec) -> (usize, usize, Vec<u8>) {
-    let (w, h) = (700usize, 240usize);
-    let mut img = vec![255u8; w * h * 3];
     let scale = PxScale::from(140.0);
     let sf = font.as_scaled(scale);
+    // Wide enough for the whole line plus a 30 px margin each side (a fixed width cut long strings off).
+    let advance: f32 = text.chars().map(|ch| sf.h_advance(font.glyph_id(ch))).sum();
+    let (w, h) = ((advance.ceil() as usize + 60).max(700), 240usize);
+    let mut img = vec![255u8; w * h * 3];
     let mut x = 30.0f32;
     let base = 170.0f32;
     for ch in text.chars() {

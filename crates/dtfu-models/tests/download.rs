@@ -469,3 +469,23 @@ fn cancel_mid_download_keeps_part_and_resume_completes() {
     );
     verify(&path, &file).unwrap();
 }
+
+/// The pinned `ocrs` files really are what the server serves (network; run with `--ignored`).
+#[test]
+#[ignore]
+fn ocrs_models_download_and_match_their_pins() {
+    let dir = tempfile::tempdir().unwrap();
+    let cancel = std::sync::atomic::AtomicBool::new(false);
+    let paths = dtfu_models::download_all(
+        &dtfu_models::OCRS_FILES,
+        dir.path(),
+        Some(dtfu_models::OCRS_BASE_URL),
+        &cancel,
+        &mut |_, _, _| {},
+    )
+    .expect("download");
+    for (path, file) in paths.iter().zip(dtfu_models::OCRS_FILES) {
+        assert_eq!(std::fs::metadata(path).unwrap().len(), file.bytes);
+        dtfu_models::verify(path, &file).unwrap();
+    }
+}

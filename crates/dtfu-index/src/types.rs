@@ -26,13 +26,21 @@ pub trait Embed {
 pub trait Ocr: Sync {
     /// `rgb` is packed RGB8. `None` means no text found or OCR unavailable.
     fn recognize(&self, width: usize, height: usize, rgb: &[u8]) -> Option<String>;
+    /// Whether text can be read now (false while an engine's model files are still missing).
+    fn ready(&self) -> bool {
+        true
+    }
 }
 
-/// Apple Vision on macOS; always `None` elsewhere until the Windows / `ocrs` backends exist.
+/// The platform's OCR (`dtfu_ocr::recognize_rgb`): Apple Vision on macOS, `ocrs` elsewhere (once its models are
+/// downloaded).
 pub struct SystemOcr;
 impl Ocr for SystemOcr {
     fn recognize(&self, width: usize, height: usize, rgb: &[u8]) -> Option<String> {
         dtfu_ocr::recognize_rgb(width, height, rgb)
+    }
+    fn ready(&self) -> bool {
+        dtfu_ocr::ready()
     }
 }
 
@@ -41,6 +49,9 @@ pub struct NoOcr;
 impl Ocr for NoOcr {
     fn recognize(&self, _: usize, _: usize, _: &[u8]) -> Option<String> {
         None
+    }
+    fn ready(&self) -> bool {
+        false
     }
 }
 

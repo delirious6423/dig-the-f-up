@@ -9,8 +9,8 @@ mod paths;
 
 pub use disk::{available_bytes, check_free_space, ensure_disk_space, remaining_bytes};
 pub use paths::{
-    app_data_dir, logs_dir, models_dir, resolve_app_data_dir, resolve_models_dir, APP_DIR_NAME,
-    LEGACY_APP_DIR_NAMES, MODELS_DIR_NAME, SHARED_MODELS_APP_DIR,
+    app_data_dir, logs_dir, models_dir, ocrs_dir, resolve_app_data_dir, resolve_models_dir, APP_DIR_NAME,
+    LEGACY_APP_DIR_NAMES, MODELS_DIR_NAME, OCRS_DIR_NAME, SHARED_MODELS_APP_DIR,
 };
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -99,6 +99,43 @@ pub fn locate(file: &ModelFile) -> Option<PathBuf> {
     candidates
         .into_iter()
         .find(|path| has_size(path, file.bytes))
+}
+
+/// Where the `ocrs` OCR models are served (the ocrs project's own bucket, linked from its README). The URLs are not
+/// versioned, so the size and SHA-256 below pin the files: a changed upstream file fails its check instead of loading.
+pub const OCRS_BASE_URL: &str = "https://ocrs-models.s3-accelerate.amazonaws.com";
+
+/// `ocrs` text detection model (2.5 MB; works with ocrs 0.13 / rten 0.26).
+pub const OCRS_DETECTION: ModelFile = ModelFile {
+    name: "text-detection.rten",
+    bytes: 2_510_284,
+    sha256: "f15cfb56bd02c4bf478a20343986504a1f01e1665c2b3a0ad66340f054b1b5ca",
+};
+
+/// `ocrs` text recognition model (9.7 MB).
+pub const OCRS_RECOGNITION: ModelFile = ModelFile {
+    name: "text-recognition.rten",
+    bytes: 9_716_568,
+    sha256: "e484866d4cce403175bd8d00b128feb08ab42e208de30e42cd9889d8f1735a6e",
+};
+
+/// Both `ocrs` model files.
+pub const OCRS_FILES: [ModelFile; 2] = [OCRS_DETECTION, OCRS_RECOGNITION];
+
+/// True when both `ocrs` model files are in [`ocrs_dir`] with their expected sizes.
+pub fn ocrs_present() -> bool {
+    let dir = ocrs_dir();
+    OCRS_FILES.iter().all(|f| has_size(&dir.join(f.name), f.bytes))
+}
+
+/// Downloads the `ocrs` model files that are missing into [`ocrs_dir`] (resumable, size- and SHA-256-checked).
+pub fn download_ocrs(cancel: &AtomicBool, progress: &mut dyn FnMut(&str, u64, u64)) -> Result<Vec<PathBuf>> {
+    if dirs::data_dir().is_none() {
+        bail!("no data folder on this system: the OCR engine would not find the models");
+    }
+    let dir = ocrs_dir();
+    fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+    download_all(&OCRS_FILES, &dir, Some(OCRS_BASE_URL), cancel, progress)
 }
 
 /// Environment variable that replaces the LightOnOCR model folder lookup (the files sit directly in it).

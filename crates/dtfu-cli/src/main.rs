@@ -75,19 +75,31 @@ fn load_embedder(text_only: bool) -> Result<Embedder> {
     Embedder::new(&text, if text_only { None } else { mmproj.as_deref() }, &Options::default())
 }
 
-/// `dtfu download`: fetches the two model files that are missing into the models folder (resumable).
+/// `dtfu download`: fetches the model files that are missing (resumable): the two embedding models into the models
+/// folder and, off macOS, the two `ocrs` OCR models into `dtfu_models::ocrs_dir()`.
 fn cmd_download() -> Result<()> {
     let dir = dtfu_models::models_dir();
     std::fs::create_dir_all(&dir)?;
-    for file in [dtfu_models::TEXT, dtfu_models::MMPROJ] {
-        if let Some(found) = dtfu_models::locate(&file) {
+    let mut wanted: Vec<(dtfu_models::ModelFile, std::path::PathBuf, Option<&str>)> =
+        [dtfu_models::TEXT, dtfu_models::MMPROJ].into_iter().map(|f| (f, dir.clone(), None)).collect();
+    if !cfg!(target_os = "macos") {
+        let ocr = dtfu_models::ocrs_dir();
+        std::fs::create_dir_all(&ocr)?;
+        wanted.extend(dtfu_models::OCRS_FILES.into_iter().map(|f| (f, ocr.clone(), Some(dtfu_models::OCRS_BASE_URL))));
+    }
+    for (file, dir, base_url) in wanted {
+        let present = match base_url {
+            None => dtfu_models::locate(&file),
+            Some(_) => Some(dir.join(file.name)).filter(|p| std::fs::metadata(p).is_ok_and(|m| m.len() == file.bytes)),
+        };
+        if let Some(found) = present {
             // The lookup only compares sizes; a download command is the place to pay for the checksum.
             dtfu_models::verify(&found, &file)?;
             println!("{}: already there, checksum ok", file.name);
             continue;
         }
         let mut last = 0u64;
-        let path = dtfu_models::download(&file, &dir, None, &mut |done, total| {
+        let path = dtfu_models::download(&file, &dir, base_url, &mut |done, total| {
             if done - last >= 8 << 20 || done == total {
                 last = done;
                 eprint!("\r{}: {:.0} / {:.0} MB", file.name, done as f64 / 1e6, total as f64 / 1e6);

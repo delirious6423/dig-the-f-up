@@ -293,6 +293,23 @@ impl IndexStore {
         Ok(())
     }
 
+    /// Queues again every finished file of `kind` that has no segment of `segment` (e.g. screenshots indexed before
+    /// OCR was available have no OCR text). Returns how many were queued.
+    pub fn requeue_lacking(&mut self, kind: FileKind, segment: SegmentKind) -> Result<usize> {
+        let ids: Vec<i64> = self
+            .conn
+            .prepare(
+                "SELECT id FROM files WHERE kind = ?1 AND state = 'done' \
+                 AND NOT EXISTS (SELECT 1 FROM segments WHERE segments.file = files.id AND segments.kind = ?2)",
+            )?
+            .query_map(params![kind.as_str(), segment.as_str()], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        for &id in &ids {
+            self.requeue(id, None)?;
+        }
+        Ok(ids.len())
+    }
+
     /// Same file at a new path (a move or rename): only the path and the name keywords change; nothing is re-embedded.
     pub fn move_file(&mut self, id: i64, new_path: &str) -> Result<()> {
         let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -1073,6 +1090,37 @@ mod tests {
         assert_eq!(strings(s.pending(None, None).unwrap()), vec!["/a/x.png".to_string()]);
         assert_eq!(s.meta("fingerprint").unwrap().as_deref(), Some("fp-2"));
         assert_eq!(s.adopt("src-a", "fp-2", Mismatch::Refuse).unwrap(), Adoption::Same);
+    }
+
+    #[test]
+    fn requeue_lacking_queues_only_finished_files_of_the_kind_without_the_segment() {
+        let dir = TempDir::new();
+        let mut s = store(&dir);
+        let shot = |s: &mut IndexStore, p: &str| s.insert_file(&file_of(p, FileKind::Screenshot, 1.0), &[]).unwrap();
+        let (bare, read, pending) = (shot(&mut s, "/d/a.png"), shot(&mut s, "/d/b.png"), shot(&mut s, "/d/c.png"));
+        let photo = s.insert_file(&file_of("/d/p.jpg", FileKind::Image, 1.0), &[]).unwrap();
+        let ocr = NewSegment {
+            kind: SegmentKind::Ocr,
+            modality: Modality::Text,
+            loc: None,
+            loc_end: None,
+            excerpt: None,
+            text: Some("hello".into()),
+            vector: None,
+        };
+        s.add_segments(read, &[ocr]).unwrap();
+        for id in [bare, read, photo] {
+            s.finish(id, FileState::Done, None, &Default::default()).unwrap();
+        }
+        assert_eq!(s.requeue_lacking(FileKind::Screenshot, SegmentKind::Ocr).unwrap(), 1);
+        let state = |s: &IndexStore, id: i64| {
+            s.files_under(&["/d".into()]).unwrap().into_iter().find(|f| f.id == id).unwrap().state
+        };
+        assert_eq!(state(&s, bare), FileState::Pending);
+        assert_eq!(state(&s, read), FileState::Done);
+        assert_eq!(state(&s, photo), FileState::Done);
+        assert_eq!(state(&s, pending), FileState::Pending);
+        assert_eq!(s.requeue_lacking(FileKind::Screenshot, SegmentKind::Ocr).unwrap(), 0);
     }
 
     #[test]

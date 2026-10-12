@@ -54,6 +54,8 @@ target/release/dtfu search "a penguin on the ice"
   QuickTime Player or IINA (not yet tested against the real players).
 - Esc or closing the window hides it. Cmd+Shift+Space brings it back (Ctrl+Shift+Space on Windows and Linux).
 - New and changed files are picked up while the app runs.
+- Text in screenshots and images is searchable. On macOS this uses Apple Vision; on Windows and Linux the app
+  downloads two small OCR models (12 MB) the first time, which read Latin-script text only.
 
 ## Your data
 

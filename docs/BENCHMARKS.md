@@ -60,6 +60,11 @@ Embedding throughput, Metal against CPU only (`cargo run --release -p dtfu-embed
 |---|---|---|---|
 | Apple Vision (default on macOS) | 0.07 s | 0.050 | 262 MB |
 | LightOnOCR-3 0.8B (optional, feature `lighton`) | 1.48 s | 0.008 | 1.81 GB |
+| ocrs 0.13 (default on Windows and Linux) | 0.13 s* | 0.183 (Latin-script images: 0.078) | not measured |
+
+ocrs reads Latin script only: the Arabic, Russian and Chinese images score ~1.0. On the other 15 it is at or under
+0.01 on ordinary text and weakest on tiny text and tables (0.14-0.33). *Measured on the Mac (`--features ocrs`)
+under load (`OCR_BENCH_NOWAIT=1`), so its time is not final; its error rate is.
 
 Most of LightOn's lead comes from two tiny-text images. The corpus is rendered on the same Mac, which may favour
 Vision. Retrieval on the eval set is identical with either engine. Command:
