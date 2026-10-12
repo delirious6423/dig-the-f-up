@@ -1,13 +1,21 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "DigUp-rs",
+  "productName": "DigUp",
   "version": "0.1.0",
   "identifier": "com.digup.rs",
-  "build": { "frontendDist": "./dist" },
+  "build": {
+    "frontendDist": "./dist"
+  },
   "app": {
     "withGlobalTauri": true,
     "windows": [
-      { "label": "main", "title": "DigUp", "width": 760, "height": 640, "resizable": true }
+      {
+        "label": "main",
+        "title": "DigUp",
+        "width": 760,
+        "height": 640,
+        "resizable": true
+      }
     ],
     "security": {
       "csp": "default-src 'self'; script-src 'self'; object-src 'none'; base-uri 'none'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src ipc: http://ipc.localhost"
@@ -16,6 +24,18 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.icns", "icons/icon.ico"]
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "category": "Productivity",
+    "macOS": {
+      "hardenedRuntime": true,
+      "entitlements": "entitlements.plist",
+      "infoPlist": "Info.plist"
+    }
   }
 }
