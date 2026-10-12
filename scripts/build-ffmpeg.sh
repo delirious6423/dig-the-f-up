@@ -137,7 +137,7 @@ fi
 # 4. Build and copy out. Strip the binaries.
 JOBS="${JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 2)}"
 echo "Building ffmpeg and ffprobe with -j$JOBS (log: $OBJ/make.log)"
-if ! make -C "$OBJ" -j"$JOBS" ffmpeg ffprobe > "$OBJ/make.log" 2>&1; then
+if ! make -C "$OBJ" -j"$JOBS" "ffmpeg$EXE" "ffprobe$EXE" > "$OBJ/make.log" 2>&1; then
   tail -40 "$OBJ/make.log" >&2
   echo "error: build failed (full log: $OBJ/make.log)" >&2
   exit 1
