@@ -20,6 +20,142 @@ const BIG_PDF_PAGES: i64 = 50;
 const PDF_STEP: i64 = 30;
 const DOC_STEP: i64 = 40;
 
+/// `refresh` reloads everything when more than this fraction of the rows is removed or must be re-evaluated.
+const REFRESH_FULL_FRACTION: f64 = 0.25;
+/// ... and every this many refreshes, as a guard against drift.
+const REFRESH_RELOAD_EVERY: u32 = 500;
+
+/// What `Searcher::refresh` did.
+#[derive(Debug, Clone, Copy)]
+pub struct RefreshStats {
+    /// Everything was reloaded (too much changed, or an out-of-order id); the other counts then describe the diff.
+    pub full: bool,
+    pub removed: usize,
+    /// Rows whose blobs were decoded (all rows, for a full reload).
+    pub added: usize,
+    /// Kept rows of changed files whose scale flag and modality were recomputed.
+    pub reevaluated: usize,
+    pub elapsed: std::time::Duration,
+}
+
+struct NewRow {
+    id: i64,
+    file: i64,
+    data: Vec<half::f16>,
+    modality: u8,
+    sets: bool,
+}
+
+struct Loaded {
+    vectors: VectorIndex,
+    row_slot: Vec<u32>,
+    row_modality: Vec<u8>,
+    row_sets_scale: Vec<bool>,
+    row_file: Vec<i64>,
+    slot_file: Vec<i64>,
+    slot_kind: Vec<Option<FileKind>>,
+    slot_of: HashMap<i64, u32>,
+    file_kind: HashMap<i64, FileKind>,
+    file_fp: HashMap<i64, u64>,
+    loaded_version: i64,
+}
+
+/// Whether a row sets the scale (see `BIG_PDF_PAGES`).
+fn sets_scale(file_kind: &str, kind: &str, loc: Option<f64>, pages: Option<i64>) -> bool {
+    let place = loc.map_or(0, |l| l as i64);
+    let later = if file_kind == "pdf" {
+        kind != "chunk" && pages.unwrap_or(0) > BIG_PDF_PAGES && place > PDF_STEP
+    } else {
+        kind == "chunk" && place > DOC_STEP
+    };
+    !later
+}
+
+fn fingerprint(kind: &str, state: rusqlite::types::ValueRef, indexed_at: rusqlite::types::ValueRef, info: rusqlite::types::ValueRef) -> u64 {
+    use rusqlite::types::ValueRef;
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    kind.hash(&mut h);
+    for v in [state, indexed_at, info] {
+        match v {
+            ValueRef::Null => 0u8.hash(&mut h),
+            ValueRef::Integer(i) => (1u8, i).hash(&mut h),
+            ValueRef::Real(f) => (2u8, f.to_bits()).hash(&mut h),
+            ValueRef::Text(t) | ValueRef::Blob(t) => (3u8, t).hash(&mut h),
+        }
+    }
+    h.finish()
+}
+
+/// The full load: every file's kind and every vector with its derived per-row state.
+fn load_all(conn: &Connection) -> Result<Loaded> {
+    let loaded_version = data_version(conn)?;
+    let mut file_kind = HashMap::new();
+    let mut file_fp = HashMap::new();
+    {
+        let mut st = conn.prepare("SELECT id, kind, state, indexed_at, info FROM files")?;
+        let mut rows = st.query([])?;
+        while let Some(r) = rows.next()? {
+            let id: i64 = r.get(0)?;
+            let kind: String = r.get(1)?;
+            if let Some(k) = FileKind::parse(&kind) {
+                file_kind.insert(id, k);
+            }
+            file_fp.insert(id, fingerprint(&kind, r.get_ref(2)?, r.get_ref(3)?, r.get_ref(4)?));
+        }
+    }
+    let mut vectors = VectorIndex::default();
+    let mut row_slot = Vec::new();
+    let mut row_modality = Vec::new();
+    let mut row_sets_scale = Vec::new();
+    let mut row_file = Vec::new();
+    let mut slot_file: Vec<i64> = Vec::new();
+    let mut slot_of: HashMap<i64, u32> = HashMap::new();
+    {
+        let mut st = conn.prepare(
+            "SELECT s.id, s.file, s.modality, s.vec, s.kind, s.loc, f.kind, \
+             CAST(json_extract(f.info, '$.pages') AS INTEGER) \
+             FROM segments s JOIN files f ON f.id = s.file WHERE s.vec IS NOT NULL ORDER BY s.id",
+        )?;
+        let mut rows = st.query([])?;
+        while let Some(r) = rows.next()? {
+            let blob: Vec<u8> = r.get(3)?;
+            let Some(v) = digup_store::decode_f16(&blob) else { continue };
+            let id: i64 = r.get(0)?;
+            let file: i64 = r.get(1)?;
+            let modality: String = r.get(2)?;
+            let kind: String = r.get(4)?;
+            let loc: Option<f64> = r.get(5)?;
+            let file_kind_text: String = r.get(6)?;
+            let pages: Option<i64> = r.get(7)?;
+            let slot = *slot_of.entry(file).or_insert_with(|| {
+                slot_file.push(file);
+                (slot_file.len() - 1) as u32
+            });
+            vectors.ids.push(id);
+            vectors.data.extend(v);
+            row_slot.push(slot);
+            row_file.push(file);
+            row_modality.push(modality_index(Modality::parse(&modality).unwrap_or(Modality::None)));
+            row_sets_scale.push(sets_scale(&file_kind_text, &kind, loc, pages));
+        }
+    }
+    let slot_kind = slot_file.iter().map(|f| file_kind.get(f).copied()).collect();
+    Ok(Loaded {
+        vectors,
+        row_slot,
+        row_modality,
+        row_sets_scale,
+        row_file,
+        slot_file,
+        slot_kind,
+        slot_of,
+        file_kind,
+        file_fp,
+        loaded_version,
+    })
+}
+
 /// Minimum vectors in a modality for its own average (`modalityMeans`); smaller groups take the average of all.
 const MIN_MODALITY_ROWS: usize = 20;
 /// Floor of the standard deviation (`meaning`).
@@ -116,6 +252,18 @@ pub struct OwnedSearcher(Searcher<'static>);
 // and the field is private). An owned `rusqlite::Connection` is `Send`, and every other field is plain owned data.
 unsafe impl Send for OwnedSearcher {}
 
+impl OwnedSearcher {
+    /// See `Searcher::refresh`.
+    pub fn refresh(&mut self) -> Result<RefreshStats> {
+        self.0.refresh()
+    }
+
+    #[doc(hidden)]
+    pub fn refresh_with_threshold(&mut self, fraction: f64) -> Result<RefreshStats> {
+        self.0.refresh_with_threshold(fraction)
+    }
+}
+
 impl std::ops::Deref for OwnedSearcher {
     type Target = Searcher<'static>;
     fn deref(&self) -> &Searcher<'static> {
@@ -133,11 +281,16 @@ pub struct Searcher<'a> {
     row_slot: Vec<u32>,
     row_modality: Vec<u8>,
     row_sets_scale: Vec<bool>,
+    /// File id of each row (kept for `refresh`).
+    row_file: Vec<i64>,
     /// File id of each slot (a slot is a file that has vectors) and its kind.
     slot_file: Vec<i64>,
     slot_kind: Vec<Option<FileKind>>,
     slot_of: HashMap<i64, u32>,
     file_kind: HashMap<i64, FileKind>,
+    /// Per file: hash of what decides its rows' derived state (see `refresh`).
+    file_fp: HashMap<i64, u64>,
+    refreshes_since_load: u32,
     /// Runs the keyword stage with the original SQL (`keyword_stage_legacy`). For the equivalence test and for
     /// checking the fast path; off in normal use.
     legacy_keyword: bool,
@@ -197,75 +350,276 @@ impl<'a> Searcher<'a> {
     }
 
     fn build(conn: ConnHandle<'a>, is_code: bool) -> Result<Self> {
-        let loaded_version = data_version(&conn)?;
-        let mut file_kind = HashMap::new();
+        let l = load_all(&conn)?;
+        Ok(Self {
+            conn,
+            is_code,
+            vectors: l.vectors,
+            row_slot: l.row_slot,
+            row_modality: l.row_modality,
+            row_sets_scale: l.row_sets_scale,
+            row_file: l.row_file,
+            slot_file: l.slot_file,
+            slot_kind: l.slot_kind,
+            slot_of: l.slot_of,
+            file_kind: l.file_kind,
+            file_fp: l.file_fp,
+            refreshes_since_load: 0,
+            legacy_keyword: false,
+            loaded_version: l.loaded_version,
+        })
+    }
+
+    fn install(&mut self, l: Loaded) {
+        self.vectors = l.vectors;
+        self.row_slot = l.row_slot;
+        self.row_modality = l.row_modality;
+        self.row_sets_scale = l.row_sets_scale;
+        self.row_file = l.row_file;
+        self.slot_file = l.slot_file;
+        self.slot_kind = l.slot_kind;
+        self.slot_of = l.slot_of;
+        self.file_kind = l.file_kind;
+        self.file_fp = l.file_fp;
+        self.loaded_version = l.loaded_version;
+        self.refreshes_since_load = 0;
+    }
+
+    /// Brings the loaded state up to date with the index without reloading what did not change; afterwards the
+    /// searcher is indistinguishable from a fresh one (same rows in the same id order, so the same float sums).
+    /// Falls back to a full reload when more than a quarter of the rows are removed or must be re-evaluated.
+    /// See `refresh_with_threshold` for how the diff works.
+    pub fn refresh(&mut self) -> Result<RefreshStats> {
+        if self.refreshes_since_load >= REFRESH_RELOAD_EVERY {
+            let t = Instant::now();
+            let l = load_all(&self.conn)?;
+            let rows = l.vectors.len();
+            self.install(l);
+            return Ok(RefreshStats { full: true, removed: 0, added: rows, reevaluated: 0, elapsed: t.elapsed() });
+        }
+        let stats = self.refresh_with_threshold(REFRESH_FULL_FRACTION)?;
+        self.refreshes_since_load += 1;
+        Ok(stats)
+    }
+
+    /// `refresh` with the fallback fraction given (the equivalence test lowers it to reach the incremental path on
+    /// small indexes).
+    ///
+    /// Reads in one read transaction (after `data_version`, as in a full load): every file's fingerprint (kind,
+    /// state, `indexed_at`, `info`) and the files that have vectors past the last loaded id (new rows get ids above
+    /// every existing row). A file is dirty when its fingerprint changed, it is new or gone, or it has such rows.
+    /// Only dirty files are looked at further: their current rows are merged by id with their loaded rows (rows
+    /// gone are dropped, new ones decoded, the rest keep their vectors but get modality and scale flag recomputed
+    /// from `info.pages`, loc and kind). Scanning the whole segments table instead would read every vector's page
+    /// (45 ms at 100k rows), which is what makes a full load slow.
+    ///
+    /// This relies on how the indexer writes (docs/spec-store-search.md): rows are only inserted or deleted, and
+    /// any delete or rewrite of a file's segments also rewrites its `files` row (`finish`, requeue, copy) or deletes
+    /// it. Segment ids are reused after a delete (`INTEGER PRIMARY KEY` without AUTOINCREMENT), so for a rewritten
+    /// file the kept rows' vectors are compared with the stored bytes. `refresh` also reloads fully every
+    /// `REFRESH_RELOAD_EVERY` refreshes, so a writer that breaks these assumptions cannot leave a searcher stale for long.
+    #[doc(hidden)]
+    pub fn refresh_with_threshold(&mut self, fraction: f64) -> Result<RefreshStats> {
+        let t = Instant::now();
+        let trace = trace_on();
+        let version = data_version(&self.conn)?;
+        let conn: &Connection = &self.conn;
+        let tx = conn.unchecked_transaction()?;
+
+        // Files: fingerprints (no allocation per row).
+        let mut file_kind: HashMap<i64, FileKind> = HashMap::with_capacity(self.file_kind.len());
+        let mut file_fp: HashMap<i64, u64> = HashMap::with_capacity(self.file_fp.len());
         {
-            let mut st = conn.prepare("SELECT id, kind FROM files")?;
+            let mut st = tx.prepare("SELECT id, kind, state, indexed_at, info FROM files")?;
             let mut rows = st.query([])?;
             while let Some(r) = rows.next()? {
-                let id: i64 = r.get(0)?;
-                let kind: String = r.get(1)?;
-                if let Some(k) = FileKind::parse(&kind) {
-                    file_kind.insert(id, k);
+                let kind = r.get_ref(1)?.as_str()?;
+                if let Some(k) = FileKind::parse(kind) {
+                    file_kind.insert(r.get(0)?, k);
+                }
+                file_fp.insert(r.get(0)?, fingerprint(kind, r.get_ref(2)?, r.get_ref(3)?, r.get_ref(4)?));
+            }
+        }
+        trace_stage(trace, "refresh files", t);
+
+        // Dirty files: row rewritten (fingerprint changed), new, gone, or with vectors past the last loaded id (new
+        // rows get ids above every row that exists, so those are the only way a file gains rows without a rewrite).
+        let mut dirty: HashSet<i64> = HashSet::new();
+        let mut rewritten: HashSet<i64> = HashSet::new();
+        for (id, fp) in &file_fp {
+            if self.file_fp.get(id) != Some(fp) {
+                dirty.insert(*id);
+                rewritten.insert(*id);
+            }
+        }
+        for id in self.file_fp.keys() {
+            if !file_fp.contains_key(id) {
+                dirty.insert(*id);
+            }
+        }
+        {
+            let last = self.vectors.ids.last().copied().unwrap_or(i64::MIN);
+            let mut st = tx.prepare("SELECT DISTINCT file FROM segments WHERE id > ?1 AND vec IS NOT NULL")?;
+            let mut rows = st.query([last])?;
+            while let Some(r) = rows.next()? {
+                dirty.insert(r.get(0)?);
+            }
+        }
+        trace_stage(trace, "refresh dirty", t);
+
+        // Loaded rows of the dirty files, by file, in row order.
+        let n = self.vectors.len();
+        let mut positions: HashMap<i64, Vec<usize>> = dirty.iter().map(|&f| (f, Vec::new())).collect();
+        if !dirty.is_empty() {
+            let mut watched = vec![false; self.slot_file.len()];
+            for f in &dirty {
+                if let Some(&s) = self.slot_of.get(f) {
+                    watched[s as usize] = true;
+                }
+            }
+            for (row, &slot) in self.row_slot.iter().enumerate() {
+                if watched[slot as usize] {
+                    positions.get_mut(&self.row_file[row]).expect("watched file").push(row);
                 }
             }
         }
 
-        let mut vectors = VectorIndex::default();
-        let mut row_slot = Vec::new();
-        let mut row_modality = Vec::new();
-        let mut row_sets_scale = Vec::new();
-        let mut slot_file: Vec<i64> = Vec::new();
-        let mut slot_of: HashMap<i64, u32> = HashMap::new();
+        // Per dirty file: merge its loaded rows with its current rows (both id-ascending).
+        let mut keep = vec![true; n];
+        let mut removed = 0usize;
+        // Kept rows: new modality and scale flag; a rewritten file's kept vectors are compared with the stored ones
+        // (segment ids are reused after a delete, so a rewrite may have put other vectors under the same ids) and
+        // replaced in place.
+        let mut reeval: Vec<(usize, u8, bool, Option<Vec<half::f16>>)> = Vec::new();
+        let mut new_rows: Vec<NewRow> = Vec::new();
         {
-            let mut st = conn.prepare(
-                "SELECT s.id, s.file, s.modality, s.vec, s.kind, s.loc, f.kind, \
-                 CAST(json_extract(f.info, '$.pages') AS INTEGER) \
-                 FROM segments s JOIN files f ON f.id = s.file WHERE s.vec IS NOT NULL ORDER BY s.id",
+            let mut st = tx.prepare(
+                "SELECT s.id, s.modality, s.kind, s.loc, f.kind, CAST(json_extract(f.info, '$.pages') AS INTEGER), s.vec \
+                 FROM segments s JOIN files f ON f.id = s.file WHERE s.file = ?1 AND s.vec IS NOT NULL ORDER BY s.id",
             )?;
-            let mut rows = st.query([])?;
-            while let Some(r) = rows.next()? {
-                let blob: Vec<u8> = r.get(3)?;
-                let Some(v) = digup_store::decode_f16(&blob) else { continue };
-                let id: i64 = r.get(0)?;
-                let file: i64 = r.get(1)?;
-                let modality: String = r.get(2)?;
-                let kind: String = r.get(4)?;
-                let loc: Option<f64> = r.get(5)?;
-                let file_kind_text: String = r.get(6)?;
-                let pages: Option<i64> = r.get(7)?;
-                let place = loc.map_or(0, |l| l as i64);
-                let later = if file_kind_text == "pdf" {
-                    kind != "chunk" && pages.unwrap_or(0) > BIG_PDF_PAGES && place > PDF_STEP
-                } else {
-                    kind == "chunk" && place > DOC_STEP
-                };
-                let slot = *slot_of.entry(file).or_insert_with(|| {
-                    slot_file.push(file);
-                    (slot_file.len() - 1) as u32
-                });
-                vectors.ids.push(id);
-                vectors.data.extend(v);
-                row_slot.push(slot);
-                row_modality.push(modality_index(Modality::parse(&modality).unwrap_or(Modality::None)));
-                row_sets_scale.push(!later);
+            for &file in &dirty {
+                let loaded = &positions[&file];
+                let check = rewritten.contains(&file);
+                let mut next = 0usize; // into `loaded`
+                let mut rows = st.query([file])?;
+                while let Some(r) = rows.next()? {
+                    let id: i64 = r.get(0)?;
+                    while next < loaded.len() && self.vectors.ids[loaded[next]] < id {
+                        keep[loaded[next]] = false;
+                        removed += 1;
+                        next += 1;
+                    }
+                    let modality: String = r.get(1)?;
+                    let kind: String = r.get(2)?;
+                    let sets = sets_scale(r.get_ref(4)?.as_str()?, &kind, r.get(3)?, r.get(5)?);
+                    let m = modality_index(Modality::parse(&modality).unwrap_or(Modality::None));
+                    if next < loaded.len() && self.vectors.ids[loaded[next]] == id {
+                        let pos = loaded[next];
+                        next += 1;
+                        let mut replacement = None;
+                        if check {
+                            let at = pos * DIM;
+                            if let Some(v) = digup_store::decode_f16(r.get_ref(6)?.as_blob()?) {
+                                if v.iter().zip(&self.vectors.data[at..at + DIM]).any(|(a, b)| a.to_bits() != b.to_bits()) {
+                                    replacement = Some(v);
+                                }
+                            }
+                        }
+                        reeval.push((pos, m, sets, replacement));
+                    } else if let Some(v) = digup_store::decode_f16(r.get_ref(6)?.as_blob()?) {
+                        new_rows.push(NewRow { id, file, data: v, modality: m, sets });
+                    }
+                }
+                for &pos in &loaded[next..] {
+                    keep[pos] = false;
+                    removed += 1;
+                }
             }
         }
-        let slot_kind = slot_file.iter().map(|f| file_kind.get(f).copied()).collect();
-        Ok(Self {
-            conn,
-            is_code,
-            vectors,
-            row_slot,
-            row_modality,
-            row_sets_scale,
-            slot_file,
-            slot_kind,
-            slot_of,
-            file_kind,
-            legacy_keyword: false,
-            loaded_version,
-        })
+        new_rows.sort_by_key(|r| r.id);
+        trace_stage(trace, "refresh reeval", t);
+        let reevaluated = reeval.len();
+        let stats = |full: bool, added: usize, t: Instant| RefreshStats {
+            full,
+            removed,
+            added,
+            reevaluated,
+            elapsed: t.elapsed(),
+        };
+        // Too much changed, or a new row sorts before a kept one (it can't be appended): a full load is cheaper or
+        // the only way to the same order.
+        let last_kept = (0..n).rev().find(|&r| keep[r]).map(|r| self.vectors.ids[r]);
+        let out_of_order = match (new_rows.first(), last_kept) {
+            (Some(a), Some(k)) => a.id < k,
+            _ => false,
+        };
+        if out_of_order || (removed + reevaluated) as f64 > fraction * n as f64 {
+            drop(tx);
+            let l = load_all(&self.conn)?;
+            let rows = l.vectors.len();
+            self.install(l);
+            return Ok(stats(true, rows, t));
+        }
+        drop(tx);
+
+        trace_stage(trace, "refresh new rows", t);
+        // Apply: re-evaluate in place, compact (order preserved), append.
+        for (pos, m, sets, replacement) in reeval {
+            self.row_modality[pos] = m;
+            self.row_sets_scale[pos] = sets;
+            if let Some(v) = replacement {
+                self.vectors.data[pos * DIM..(pos + 1) * DIM].copy_from_slice(&v);
+            }
+        }
+        if removed > 0 {
+            let mut w = 0usize;
+            for (r, &kept) in keep.iter().enumerate() {
+                if !kept {
+                    continue;
+                }
+                if w != r {
+                    self.vectors.data.copy_within(r * DIM..(r + 1) * DIM, w * DIM);
+                    self.vectors.ids[w] = self.vectors.ids[r];
+                    self.row_file[w] = self.row_file[r];
+                    self.row_modality[w] = self.row_modality[r];
+                    self.row_sets_scale[w] = self.row_sets_scale[r];
+                }
+                w += 1;
+            }
+            self.vectors.ids.truncate(w);
+            self.vectors.data.truncate(w * DIM);
+            self.row_file.truncate(w);
+            self.row_modality.truncate(w);
+            self.row_sets_scale.truncate(w);
+        }
+        let appended = new_rows.len();
+        for r in new_rows {
+            self.vectors.ids.push(r.id);
+            self.vectors.data.extend(r.data);
+            self.row_file.push(r.file);
+            self.row_modality.push(r.modality);
+            self.row_sets_scale.push(r.sets);
+        }
+        trace_stage(trace, "refresh apply", t);
+        // Slots exactly as a fresh load numbers them (first appearance in row order).
+        if removed > 0 || appended > 0 {
+            self.slot_file.clear();
+            self.slot_of.clear();
+            self.row_slot.clear();
+            for &file in &self.row_file {
+                let slot = *self.slot_of.entry(file).or_insert_with(|| {
+                    self.slot_file.push(file);
+                    (self.slot_file.len() - 1) as u32
+                });
+                self.row_slot.push(slot);
+            }
+        }
+        trace_stage(trace, "refresh slots", t);
+        self.file_kind = file_kind;
+        self.slot_kind = self.slot_file.iter().map(|f| self.file_kind.get(f).copied()).collect();
+        self.file_fp = file_fp;
+        self.loaded_version = version;
+        Ok(stats(false, appended, t))
     }
 
     /// Number of stored vectors.
@@ -951,6 +1305,9 @@ mod tests {
             row_slot: vec![0; modality.len()],
             row_modality: modality,
             row_sets_scale: sets,
+            row_file: Vec::new(),
+            file_fp: HashMap::new(),
+            refreshes_since_load: 0,
             slot_file: Vec::new(),
             slot_kind: Vec::new(),
             slot_of: HashMap::new(),

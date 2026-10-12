@@ -174,3 +174,49 @@ Verdict:
   files are being indexed. It only helps between commits. At 1M the churn test shows that rebuilds dominate the
   query path during active indexing. Incremental Searcher updates are the only fix for that case (not done here).
 - Estimates: none. All numbers above are measured on this machine, once per size.
+
+## R1b. Incremental `Searcher::refresh` vs full rebuild (2026-10-12, M4 10 cores, 16 GB, synthetic data)
+
+What changed: `Searcher::refresh()` (used by `Inner::with_searcher` when `is_current()` is false) reads every file's
+fingerprint plus the files with vectors past the last loaded id, merges only the dirty files' rows with the loaded
+ones, appends the new rows, drops the removed ones with an order-preserving compaction and recomputes slots, so
+results equal a fresh `Searcher`. It falls back to a full load when more than 25% of rows are removed or
+re-evaluated, and every 500 refreshes. Why not scan `(id, file)` of all segments: measured 45 ms at 100k rows
+(it touches every vector page), about the cost it was meant to avoid.
+
+Correctness: `crates/digup-search/tests/refresh_equivalence.rs`, 240 random mutation steps (1 to 3 mutations each: add
+file, delete file, re-embed with reused segment ids, later steps of a long pdf/doc with `info.pages` > 50 so the scale
+flags change, kind change, info-only change), 30 queries per step (vector-only, with text, kinds filter, lowered
+z gate) against a fresh `Searcher`, two refreshing searchers (default and never-fall-back): 7200 queries each,
+34398 hits compared bitwise (f64 score, z, cosine bits, segment, keyword rank), 0 mismatches. Disabling the
+rewritten-file vector check makes it fail at step 71, so the test does reach the id-reuse case.
+
+Command (same binary; new vectors committed by another connection in one transaction, then refresh and a full
+open+load of the same state are timed, then 50 queries compared by `Debug` output):
+```bash
+cargo build --release -p digup-search --example resident_bench
+target/release/examples/resident_bench 100000  --only-refresh --db <scratch>/r100k.sqlite
+target/release/examples/resident_bench 1000000 --only-refresh --db <scratch>/r1m.sqlite
+```
+DBs deleted afterwards. Load1 was 1.6 to 1.9 at the start of every row except where noted (gate: below 4).
+
+| Index | New segments | refresh | full rebuild | ratio | identity |
+|---|---|---|---|---|---|
+| 100k | 1,000 | 17.6 ms | 92.8 ms | 5.3x | 0/50 mismatches |
+| 100k | 10,000 | 44.7 ms | 102.3 ms | 2.3x | 0/50 |
+| 1M | 1,000 | 293 ms (run 2: 181 ms) | 3196 ms (run 2: 1859 ms) | 10.9x (10.3x) | 0/50 |
+| 1M | 10,000 | 1591 ms (run 2: 543 ms; load 3.9, near the gate) | 3148 ms (run 2: 2800 ms) | 2.0x (5.2x) | 0/50 |
+
+Where the time goes: the fixed part is the scan of the `files` table for fingerprints (about 10 ms at 100k with
+70k files, 100 to 270 ms at 1M with about 700k files) and the slot recompute (2 ms at 100k, 20 to 60 ms at 1M);
+decoding the new blobs is about 2 us each.
+
+Verdict (honest): refresh is a clear win for the case it was built for, a few segments committed at a time
+while indexing: about 18 ms vs 93 ms at 100k and about 0.2 to 0.3 s vs 2 to 3 s at 1M, with identical results. The
+gain shrinks as the batch grows (10k new segments at 1M: 2x to 5x) and a refresh never beats a full rebuild by
+more than about 10x because the files scan and slot rebuild remain. The full rebuild here (1.9 to 3.2 s at 1M) is much
+faster than the 13 s of R1 phase 5, which ran under memory pressure; 1M numbers on this shared 16 GB box vary 2x to
+3x between runs, so the 1M rows are indicative, not final. The scan of the files table and the slot recompute could be
+made incremental if 0.2 s per commit at 1M turns out to matter. The path relies on the indexer's invariant that any
+delete or rewrite of a file's segments also rewrites or deletes its `files` row (checked in `digup-store/src/index.rs`);
+the 500-refresh full reload bounds the damage if that is ever violated. No estimates in this section.

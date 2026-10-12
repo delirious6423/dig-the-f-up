@@ -12,11 +12,15 @@
 //!   5. churn: a writer thread (its own connection) commits one segment per second for CHURN_SECS seconds while the
 //!      reader queries every 100 ms through the same `is_current` + rebuild path the engine uses.
 //!
+//!   7. refresh vs rebuild (`--refresh`, alone with `--only-refresh`): another connection commits K new segments
+//!      (K = 1000, 10000, one tx), then `OwnedSearcher::refresh` is timed against a full rebuild (open + load) of the same
+//!      state, and the refreshed searcher is compared with the fresh one on IDENTITY_COUNT queries.
+//!
 //! Every timed phase first waits until the 1-minute load average is below LOAD_LIMIT (polling `vm.loadavg` every
 //! 10 s, up to LOAD_WAIT). It prints the load before and after the phase, and marks the phase LOADED if the load was
 //! still at or above the limit when the wait ran out or when the phase ended. LOADED timings are not final.
 //!
-//! Usage: cargo run --release -p digup-search --example resident_bench -- [N] [--db PATH] [--churn SECS]
+//! Usage: cargo run --release -p digup-search --example resident_bench -- [N] [--db PATH] [--churn SECS] [--only-refresh]
 //! Default N = 100000. Default DB: <temp dir>/digup-resident-N.sqlite (any existing file is deleted first).
 //! Opens the index with `digup_store::open` (the same pragmas as the store), not the engine's `IndexStore::open`.
 
@@ -224,7 +228,28 @@ fn end(g: Gate, label: &str) {
     );
 }
 
+/// `count` new files with one image segment each, one transaction.
+fn insert_batch(conn: &mut Connection, first_seq: u64, count: usize, rng: &mut Rng) -> Result<()> {
+    let tx = conn.transaction()?;
+    {
+        let mut f = tx.prepare_cached(
+            "INSERT INTO files(path, kind, size, mtime, inode, device, state) VALUES(?1, 'image', 1000, 1.7e9, ?2, 1, 'done')",
+        )?;
+        let mut s = tx.prepare_cached(
+            "INSERT INTO segments(file, kind, modality, loc, loc_end, excerpt, vec) VALUES(?1, 'image', 'image', 1.0, NULL, NULL, ?2)",
+        )?;
+        for i in 0..count as u64 {
+            let seq = first_seq + i;
+            f.execute(params![format!("/bench/batch/{seq:08}.dat"), (1u64 << 41) as i64 + seq as i64])?;
+            s.execute(params![tx.last_insert_rowid(), encode_f16(&unit_vector(rng))])?;
+        }
+    }
+    tx.commit()?;
+    Ok(())
+}
+
 struct Args {
+    only_refresh: bool,
     n: usize,
     db: PathBuf,
     churn_secs: u64,
@@ -234,10 +259,13 @@ fn parse_args() -> Args {
     let mut n = 100_000usize;
     let mut db = None;
     let mut churn_secs = 30u64;
+    let mut only_refresh = false;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         if a == "--db" {
             db = args.next().map(PathBuf::from);
+        } else if a == "--only-refresh" {
+            only_refresh = true;
         } else if a == "--churn" {
             churn_secs = args.next().and_then(|s| s.parse().ok()).unwrap_or(30);
         } else if let Ok(v) = a.parse::<usize>() {
@@ -248,7 +276,7 @@ fn parse_args() -> Args {
         }
     }
     let db = db.unwrap_or_else(|| std::env::temp_dir().join(format!("digup-resident-{n}.sqlite")));
-    Args { n, db, churn_secs }
+    Args { only_refresh, n, db, churn_secs }
 }
 
 fn main() -> Result<()> {
@@ -286,6 +314,43 @@ fn main() -> Result<()> {
     let opts = SearchOptions::default();
     let vectors = Searcher::new(&reader)?.vector_count();
     println!("vectors={vectors}");
+
+    let refresh_phase = || -> Result<()> {
+        let mut owned = Searcher::with_owned_connection(open(&db)?, false)?;
+        let mut writer = open(&db)?;
+        let mut wrng = Rng(0x7777_1111_2222_3333);
+        let mut seq = 5_000_000u64;
+        for k in [1_000usize, 10_000] {
+            let label = format!("7 refresh vs rebuild, {k} new segments");
+            insert_batch(&mut writer, seq, k, &mut wrng)?;
+            seq += k as u64;
+            assert!(!owned.is_current()?);
+            let g = gate(&label);
+            let t = Instant::now();
+            let stats = owned.refresh()?;
+            let refresh_ms = ms(t);
+            let t = Instant::now();
+            let fresh = Searcher::with_owned_connection(open(&db)?, false)?;
+            let rebuild_ms = ms(t);
+            end(g, &label);
+            let mut mismatches = 0usize;
+            for i in 0..IDENTITY_COUNT {
+                let (qv, text) = query(i);
+                if format!("{:?}", fresh.search(qv, text, &opts)?) != format!("{:?}", owned.search(qv, text, &opts)?) {
+                    mismatches += 1;
+                }
+            }
+            println!(
+                "RESULT refresh k={k} on {vectors} vectors: refresh {refresh_ms:.1} ms (full={} removed={} added={} reevaluated={}), rebuild {rebuild_ms:.1} ms, speedup x{:.1}, identity mismatches={mismatches}/{IDENTITY_COUNT}",
+                stats.full, stats.removed, stats.added, stats.reevaluated, rebuild_ms / refresh_ms
+            );
+            assert!(owned.is_current()?);
+        }
+        Ok(())
+    };
+    if args.only_refresh {
+        return refresh_phase();
+    }
 
     // 1. Old behaviour: open, load every vector, search, per query.
     let g = gate("1 fresh per query");
@@ -460,5 +525,5 @@ fn main() -> Result<()> {
     println!("RESULT churn query incl. rebuild n={}: {}", lat_rebuild.len(), fmt_stat(stat(lat_rebuild), "ms"));
     let (m, p) = stat(rebuild_ms);
     println!("RESULT churn rebuild only: p50 {m:.1} ms p95 {p:.1} ms");
-    Ok(())
+    refresh_phase()
 }

@@ -7,5 +7,5 @@ pub mod searcher;
 pub use digup_text as text;
 
 pub use searcher::{
-    fts_query, is_lookup, kind_hints, strong_count, terms, SearchHit, SearchOptions, Searcher,
+    fts_query, is_lookup, kind_hints, strong_count, terms, RefreshStats, SearchHit, SearchOptions, Searcher,
 };

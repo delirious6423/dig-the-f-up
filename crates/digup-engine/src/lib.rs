@@ -174,8 +174,10 @@ struct Inner {
     /// so it is paid once per index change instead of once per query. See `Inner::with_searcher`.
     main_searcher: Mutex<Option<OwnedSearcher>>,
     code_searcher: Mutex<Option<OwnedSearcher>>,
-    /// How many times a cached searcher was (re)built; for tests and diagnostics.
+    /// How many times a cached searcher was loaded in full (first query, or a refresh that fell back); for tests and diagnostics.
     searcher_loads: AtomicUsize,
+    /// How many times a cached searcher was brought up to date incrementally (no full load).
+    searcher_refreshes: AtomicUsize,
     watcher: Mutex<Option<digup_watch::Watcher>>,
     usage: Mutex<Option<digup_usage::UsageStore>>,
     status: Mutex<Status>,
@@ -203,10 +205,24 @@ impl Inner {
     fn with_searcher<R>(&self, code: bool, f: impl FnOnce(&Searcher<'static>) -> Result<R>) -> Result<R> {
         let slot = if code { &self.code_searcher } else { &self.main_searcher };
         let mut guard = lock(slot);
-        let fresh = match guard.as_ref() {
+        let mut fresh = match guard.as_ref() {
             Some(s) => s.is_current()?,
             None => false,
         };
+        if !fresh {
+            if let Some(s) = guard.as_mut() {
+                // Update what changed instead of reloading every vector (docs/BENCHMARKS.md R1); a full load is the
+                // fallback when that fails.
+                match s.refresh() {
+                    Ok(stats) => {
+                        let counter = if stats.full { &self.searcher_loads } else { &self.searcher_refreshes };
+                        counter.fetch_add(1, Ordering::SeqCst);
+                        fresh = true;
+                    }
+                    Err(e) => eprintln!("digup: searcher refresh failed ({e}); reloading"),
+                }
+            }
+        }
         if !fresh {
             *guard = None; // drop the old vectors before loading the new ones
             let store = IndexStore::open(&self.cfg.index_dir, if code { CODE_FILE } else { MAIN_FILE })?;
@@ -463,6 +479,7 @@ impl Engine {
                 main_searcher: Mutex::new(None),
                 code_searcher: Mutex::new(None),
                 searcher_loads: AtomicUsize::new(0),
+                searcher_refreshes: AtomicUsize::new(0),
                 watcher: Mutex::new(None),
                 usage: Mutex::new(None),
                 status: Mutex::new(Status::Ready),
@@ -891,7 +908,7 @@ mod tests {
     }
 
     #[test]
-    fn searcher_is_kept_between_queries_and_rebuilt_after_a_change() {
+    fn searcher_is_kept_between_queries_and_refreshed_after_a_change() {
         let tmp = tempfile::tempdir().unwrap();
         let docs = tmp.path().join("docs");
         notes(&docs);
@@ -911,7 +928,8 @@ mod tests {
         std::fs::write(docs.join("d.txt"), "A pelican scooped fish from the harbour.").unwrap();
         e.start_indexing().unwrap();
         wait_for("new file", || e.search("pelican", 3, None).map(|h| h.first().is_some_and(|h| h.path.ends_with("d.txt"))).unwrap_or(false));
-        assert!(loads() > first, "a commit makes the next query rebuild the searcher");
+        assert_eq!(loads(), first, "a commit refreshes the searcher instead of reloading every vector");
+        assert!(e.inner.searcher_refreshes.load(Ordering::SeqCst) >= 1, "the commit led to a refresh");
         e.shutdown();
     }
 
