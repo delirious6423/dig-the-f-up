@@ -5,6 +5,7 @@
 //!
 //! Each mode runs in its own child process (this same test binary, selected by DTFU_MMAP_CHILD), because
 //! ru_maxrss is a process-lifetime peak and would otherwise carry over from the first mode.
+#![cfg(unix)] // measures peak RSS with getrusage
 
 use dtfu_embed::{cosine, Embedder, Options};
 use std::path::PathBuf;

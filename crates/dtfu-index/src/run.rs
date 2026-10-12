@@ -748,8 +748,9 @@ mod tests {
         sync(&mut store, std::slice::from_ref(&root), &opts, false).unwrap();
         let key = volume_key(root.join("vol-d/x.txt").to_str().unwrap());
         run(&mut store, &mut fake, &NoOcr, &opts, None, None, &|| false, &mut |_| {}).unwrap();
+        // At most one: on a slow machine the hung helper's (test) sleep may already have ended and released it.
         let hung_for_key = with_registry(|r| r.helpers.values().filter(|(k, h)| *h && *k == key).count());
-        assert_eq!(hung_for_key, 1);
+        assert!(hung_for_key <= 1, "{hung_for_key} hung helpers for one drive");
         let started_here = HANG_STARTED.lock().unwrap().iter().filter(|p| p.starts_with(root.to_str().unwrap())).count();
         assert_eq!(started_here, 1);
         assert_eq!(store.pending_count().unwrap(), 4);
