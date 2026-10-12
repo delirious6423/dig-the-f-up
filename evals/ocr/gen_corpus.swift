@@ -1,11 +1,12 @@
 // Renders the OCR benchmark corpus: PNG + ground-truth .txt per case (known strings, so no OCR engine is the reference).
-// Usage: swiftc -O gen_corpus.swift -o /tmp/gen_corpus && /tmp/gen_corpus <out-dir>
+// Usage: swiftc -O gen_corpus.swift -o /tmp/gen_corpus && /tmp/gen_corpus <out-dir> [multi]
+// `multi` renders the 16-language set (evals/ocr/corpus_multi) instead of the main corpus (evals/ocr/corpus).
 import AppKit
 import CoreImage
 
 struct Case { let id: String; let w: Int; let h: Int; let bg: UInt32; let fg: UInt32; let font: String; let pt: CGFloat; let lines: [String]; var rot: CGFloat = 0; var jpeg: CGFloat? = nil; var blur: Double = 0; var noise: Int = 0 }
 
-let cases: [Case] = [
+let mainCases: [Case] = [
   Case(id: "en_body_light", w: 1280, h: 720, bg: 0xFFFFFF, fg: 0x1A1A1A, font: "Helvetica", pt: 18, lines: [
     "Quarterly planning notes", "The launch moved to November 14 because the payment provider needs a security review.",
     "Action items: Priya will update the roadmap, Mateo will draft the customer email,", "and Lin will confirm the budget of $42,500 with finance by Friday."]),
@@ -51,6 +52,44 @@ let cases: [Case] = [
     "Boarding pass", "Flight LH 717  Gate B32  Seat 14C", "Departure 07:55  Boarding 07:15"], rot: 1, jpeg: 0.4, blur: 1.1, noise: 6000),
 ]
 
+// Scripts and languages beyond the main corpus (added to compare OCR engines on multilingual text).
+let multiCases: [Case] = [
+  Case(id: "ja_body", w: 1280, h: 720, bg: 0xFFFFFF, fg: 0x1A1A1A, font: "Hiragino Sans", pt: 18, lines: [
+    "週末の予定", "土曜日の朝は海辺を散歩して、昼に寿司を食べます。", "新製品の発売は支払いシステムの不具合で十一月に延期されました。"]),
+  Case(id: "ja_kana_small", w: 1280, h: 720, bg: 0xF5F5F5, fg: 0x333333, font: "Hiragino Sans", pt: 11, lines: [
+    "ファイルを保存しました", "ダウンロードフォルダにコピーしますか？", "キャンセル　　OK"]),
+  Case(id: "ko_body", w: 1280, h: 720, bg: 0xFFFFFF, fg: 0x1A1A1A, font: "Apple SD Gothic Neo", pt: 18, lines: [
+    "회의 일정", "다음 주 수요일 오후 세 시에 팀 회의가 있습니다.", "보고서는 금요일까지 제출해 주세요."]),
+  Case(id: "hi_body", w: 1280, h: 720, bg: 0xFFFFFF, fg: 0x1A1A1A, font: "Kohinoor Devanagari", pt: 20, lines: [
+    "सप्ताह की योजना", "बुधवार को सुबह दस बजे टीम के साथ बैठक है।", "रिपोर्ट शुक्रवार तक भेजनी है।"]),
+  Case(id: "bn_body", w: 1280, h: 720, bg: 0xFFFFFF, fg: 0x1A1A1A, font: "Kohinoor Bangla", pt: 20, lines: [
+    "সাপ্তাহিক পরিকল্পনা", "বুধবার সকাল দশটায় দলের সাথে সভা আছে।"]),
+  Case(id: "ta_body", w: 1280, h: 720, bg: 0xFFFFFF, fg: 0x1A1A1A, font: "Tamil Sangam MN", pt: 20, lines: [
+    "வாராந்திர திட்டம்", "புதன்கிழமை காலை பத்து மணிக்கு கூட்டம் உள்ளது."]),
+  Case(id: "th_body", w: 1280, h: 720, bg: 0xFFFFFF, fg: 0x1A1A1A, font: "Thonburi", pt: 20, lines: [
+    "แผนประจำสัปดาห์", "ประชุมทีมวันพุธเวลาสิบโมงเช้า", "กรุณาส่งรายงานภายในวันศุกร์"]),
+  Case(id: "he_body", w: 1280, h: 720, bg: 0xFFFFFF, fg: 0x1A1A1A, font: "Arial Hebrew", pt: 20, lines: [
+    "ברוכים הבאים לאפליקציה", "ההשקה נדחתה לחודש נובמבר בגלל בעיה במערכת התשלומים."]),
+  Case(id: "fa_body", w: 1280, h: 720, bg: 0xFFFFFF, fg: 0x1A1A1A, font: "GeezaPro", pt: 20, lines: [
+    "برنامه هفتگی", "جلسه تیم روز چهارشنبه ساعت ده صبح برگزار می‌شود."]),
+  Case(id: "el_body", w: 1280, h: 720, bg: 0xFFFFFF, fg: 0x1A1A1A, font: "Helvetica", pt: 18, lines: [
+    "Πρόγραμμα εβδομάδας", "Η συνάντηση της ομάδας είναι την Τετάρτη στις 10:30.", "Η αναφορά πρέπει να σταλεί μέχρι την Παρασκευή."]),
+  Case(id: "uk_body", w: 1280, h: 720, bg: 0xFFFFFF, fg: 0x1A1A1A, font: "Helvetica", pt: 18, lines: [
+    "План на тиждень", "Зустріч із командою в середу о 10:30, звіт треба надіслати до п’ятниці."]),
+  Case(id: "vi_body", w: 1280, h: 720, bg: 0xFFFFFF, fg: 0x1A1A1A, font: "Helvetica", pt: 18, lines: [
+    "Kế hoạch tuần này", "Cuộc họp nhóm vào thứ Tư lúc 10 giờ 30 sáng.", "Báo cáo phải được gửi trước thứ Sáu."]),
+  Case(id: "de_fr_es", w: 1280, h: 720, bg: 0xFFFFFF, fg: 0x1A1A1A, font: "Helvetica", pt: 16, lines: [
+    "Größe: 42 – Überweisung bis Freitag, Grüße aus München", "Réunion déplacée à jeudi, à côté de l'hôpital Saint-Étienne", "Año nuevo: mañana pagaré la cuenta del señor Muñoz"]),
+  Case(id: "pl_cs_tr", w: 1280, h: 720, bg: 0xFFFFFF, fg: 0x1A1A1A, font: "Helvetica", pt: 16, lines: [
+    "Zażółć gęślą jaźń, spotkanie w środę", "Příliš žluťoučký kůň úpěl ďábelské ódy", "Toplantı çarşamba günü, şirket ağı güncellendi"]),
+  Case(id: "ko_dark_small", w: 1280, h: 720, bg: 0x1E1E1E, fg: 0xD4D4D4, font: "Apple SD Gothic Neo", pt: 12, lines: [
+    "설정 > 개인정보 보호", "위치 접근 허용: 끔", "마지막 검사: 2026년 10월 12일"]),
+  Case(id: "ja_en_mixed", w: 1280, h: 720, bg: 0x2B2B2B, fg: 0xEEEEEE, font: "Hiragino Sans", pt: 13, lines: [
+    "Settings 設定", "Language 言語: 日本語", "Display 画面 - Brightness 明るさ 70%"]),
+]
+
+let cases = CommandLine.arguments.count > 2 && CommandLine.arguments[2] == "multi" ? multiCases : mainCases
+
 func color(_ rgb: UInt32) -> NSColor {
   NSColor(srgbRed: CGFloat((rgb >> 16) & 255) / 255, green: CGFloat((rgb >> 8) & 255) / 255, blue: CGFloat(rgb & 255) / 255, alpha: 1)
 }
@@ -63,7 +102,7 @@ for c in cases {
   NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
   color(c.bg).setFill(); NSRect(x: 0, y: 0, width: c.w, height: c.h).fill()
   let font = NSFont(name: c.font, size: c.pt) ?? NSFont.systemFont(ofSize: c.pt)
-  let para = NSMutableParagraphStyle(); para.alignment = c.id.hasPrefix("ar_") ? .right : .left
+  let para = NSMutableParagraphStyle(); para.alignment = (c.id.hasPrefix("ar_") || c.id.hasPrefix("he_") || c.id.hasPrefix("fa_")) ? .right : .left
   let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: color(c.fg), .paragraphStyle: para]
   if c.rot != 0 {
     let t = NSAffineTransform(); t.translateX(by: CGFloat(c.w) / 2, yBy: CGFloat(c.h) / 2); t.rotate(byDegrees: c.rot); t.translateX(by: -CGFloat(c.w) / 2, yBy: -CGFloat(c.h) / 2); t.concat()

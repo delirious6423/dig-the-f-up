@@ -69,3 +69,24 @@ under load (`OCR_BENCH_NOWAIT=1`), so its time is not final; its error rate is.
 Most of LightOn's lead comes from two tiny-text images. The corpus is rendered on the same Mac, which may favour
 Vision. Retrieval on the eval set is identical with either engine. Command:
 `cargo run --release -p dtfu-ocr --features lighton --example ocr_bench -- evals/ocr/corpus 5 vision,lighton`.
+
+### More languages (16 synthetic images, `evals/ocr/corpus_multi`)
+
+Japanese, Korean, Hindi, Bengali, Tamil, Thai, Hebrew, Persian, Greek, Ukrainian, Vietnamese and accented Latin
+(German, French, Spanish, Polish, Czech, Turkish). Character error rate, n=1:
+
+| engine | all 16 | weakest images |
+|---|---|---|
+| Apple Vision | 0.332 | Hebrew, Greek, Hindi, Bengali, Tamil: ~1.0 (no usable text); Persian 0.14 |
+| LightOnOCR-3 0.8B | 0.018 | Thai 0.085, Bengali 0.082; everything else under 0.05 |
+| Infinity-Parser2-Flash 2B (not shipped, tried as an alternative) | 0.117 | Hebrew 0.84, Persian 0.78 (text written in reversed order), Thai 0.14 |
+
+Vision is at or near 0 on Japanese, Korean, Thai, Vietnamese, Ukrainian and accented Latin. Infinity-Parser2-Flash
+([infly/Infinity-Parser2-Flash](https://huggingface.co/infly/Infinity-Parser2-Flash), Q8_0 GGUF from
+prithivMLmods/Infinity-Parser2-Flash-GGUF, prompt "Please transform the document's contents into Markdown format.")
+scored 0.0097 on the main corpus against LightOn's 0.0076, took about 2.7x as long per image (4.6 s vs 1.7 s median,
+both runs under the same load) and peaked at 3.4 GB RSS vs 2.1 GB for LightOn (`/usr/bin/time -l` on the
+`lighton_probe` example, one image). With an empty prompt it switches tasks per image (bounding-box JSON,
+chart-to-code). Command: `OCR_BENCH_NOWAIT=1 cargo run --release -p dtfu-ocr --features lighton --example ocr_bench --
+evals/ocr/corpus_multi 1 vision,lighton` (Flash was run through the same backend with a temporary local patch for its
+file names and prompt). The machine was loaded during these runs, so the times compare engines, not final speeds.
