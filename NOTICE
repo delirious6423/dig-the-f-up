@@ -6,4 +6,6 @@ constants are taken from that project's Swift sources so that indexes and
 search quality stay comparable. Keep DigUp's MIT copyright notice with any
 redistribution of this code.
 
-Also used: llama.cpp (MIT), EmbeddingGemma 2 by Google DeepMind (Apache 2.0).
+Also used: llama.cpp b11461 (MIT, compiled into the app), EmbeddingGemma 2 by Google DeepMind (Apache 2.0,
+downloaded at run time, not shipped in the app). Full component list and Rust crate licenses:
+docs/THIRD-PARTY.md and scripts/gen-third-party-licenses.sh.
