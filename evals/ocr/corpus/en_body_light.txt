@@ -1,0 +1,4 @@
+Quarterly planning notes
+The launch moved to November 14 because the payment provider needs a security review.
+Action items: Priya will update the roadmap, Mateo will draft the customer email,
+and Lin will confirm the budget of $42,500 with finance by Friday.

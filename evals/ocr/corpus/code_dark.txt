@@ -1,0 +1,7 @@
+fn main() -> Result<(), Error> {
+    let cfg = Config::load("app.toml")?;
+    for (i, item) in cfg.items.iter().enumerate() {
+        println!("{i}: {}", item.name);
+    }
+    Ok(())
+}
