@@ -51,6 +51,15 @@ impl std::fmt::Display for VideoError {
 }
 impl std::error::Error for VideoError {}
 
+/// File names to try for `name` inside each directory: the bare name, plus `<name>.exe` on Windows.
+fn tool_candidates(name: &str, windows: bool) -> Vec<String> {
+    if windows && !name.to_ascii_lowercase().ends_with(".exe") {
+        vec![name.to_string(), format!("{name}.exe")]
+    } else {
+        vec![name.to_string()]
+    }
+}
+
 /// Locate a tool via PATH, then the Homebrew prefixes.
 pub fn find_tool(name: &str) -> Option<PathBuf> {
     let mut dirs: Vec<PathBuf> = std::env::var_os("PATH")
@@ -58,7 +67,34 @@ pub fn find_tool(name: &str) -> Option<PathBuf> {
         .unwrap_or_default();
     dirs.push("/opt/homebrew/bin".into());
     dirs.push("/usr/local/bin".into());
-    dirs.into_iter().map(|d| d.join(name)).find(|p| p.is_file())
+    let names = tool_candidates(name, cfg!(windows));
+    dirs.into_iter()
+        .flat_map(|d| names.iter().map(move |n| d.join(n)))
+        .find(|p| p.is_file())
+}
+
+#[cfg(test)]
+mod find_tool_tests {
+    use super::tool_candidates;
+
+    #[test]
+    fn unix_candidates_are_bare_name_only() {
+        assert_eq!(tool_candidates("ffprobe", false), vec!["ffprobe".to_string()]);
+    }
+
+    #[test]
+    fn windows_candidates_add_exe() {
+        assert_eq!(
+            tool_candidates("ffprobe", true),
+            vec!["ffprobe".to_string(), "ffprobe.exe".to_string()]
+        );
+    }
+
+    #[test]
+    fn windows_does_not_double_exe() {
+        assert_eq!(tool_candidates("ffmpeg.exe", true), vec!["ffmpeg.exe".to_string()]);
+        assert_eq!(tool_candidates("FFMPEG.EXE", true), vec!["FFMPEG.EXE".to_string()]);
+    }
 }
 
 pub fn probe(path: &Path) -> Result<VideoInfo, VideoError> {

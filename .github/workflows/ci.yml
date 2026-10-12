@@ -5,6 +5,9 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # Shipped binaries must use the portable CPU baseline (NATIVE=0). Job-level so the cache key can reference them.
+  NATIVE: "0"
+  BACKEND: "auto"
 
 jobs:
   test:
@@ -35,11 +38,15 @@ jobs:
           path: |
             build-llama
             vendor
-          key: llama-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/build-llama.sh', 'patches/**') }}
+          key: llama-${{ runner.os }}-${{ runner.arch }}-native${{ env.NATIVE }}-${{ env.BACKEND }}-${{ hashFiles('scripts/build-llama.sh', 'patches/**') }}
       - name: Build llama.cpp (b11461 + patch)
         shell: bash
+        env:
+          NATIVE: "0"
+          BACKEND: "auto"
         run: scripts/build-llama.sh
       - name: Tests (model-dependent tests skip when the GGUF files are absent)
         run: cargo test --workspace --release
       - name: Clippy
-        run: cargo clippy --workspace --all-targets --release
+        # May fail until warnings in crates/digup-search/src/filters.rs are fixed.
+        run: cargo clippy --workspace --all-targets --release -- -D warnings

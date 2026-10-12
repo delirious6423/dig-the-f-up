@@ -16,6 +16,8 @@ TAG="${TAG:-b11461}"
 SRC="${SRC:-vendor/llama.cpp}"
 BUILD="${BUILD:-build-llama}"
 PATCH="patches/llama.cpp-no-logits.patch"
+PATCH_ABS="$PWD/$PATCH"   # absolute: `git -C "$SRC" apply` resolves relative paths against $SRC
+WIN_ENV="${OS:-}"         # Windows sets OS=Windows_NT; read before OS is overwritten below
 OS="$(uname -s)"
 BACKEND="${BACKEND:-auto}"
 
@@ -26,9 +28,9 @@ fi
 [[ "$(git -C "$SRC" describe --tags --exact-match 2>/dev/null || true)" == "$TAG" ]] || { echo "error: $SRC is not at $TAG" >&2; exit 1; }
 
 # The patch stops llama.cpp reserving a 1 MiB logits buffer per token for an embeddings-only model.
-if git -C "$SRC" apply --check "../../$PATCH" 2>/dev/null; then
-  git -C "$SRC" apply "../../$PATCH"
-elif ! git -C "$SRC" apply --check --reverse "../../$PATCH" 2>/dev/null; then
+if git -C "$SRC" apply --check "$PATCH_ABS" 2>/dev/null; then
+  git -C "$SRC" apply "$PATCH_ABS"
+elif ! git -C "$SRC" apply --check --reverse "$PATCH_ABS" 2>/dev/null; then
   echo "error: $PATCH neither applies nor is already applied" >&2; exit 1
 fi
 
@@ -46,8 +48,13 @@ case "$BACKEND" in
   *) echo "unknown BACKEND=$BACKEND" >&2; exit 1 ;;
 esac
 # Native CPU tuning is great for local runs but crashes on older CPUs if you ship the binary.
+# Shipped binaries must be built with NATIVE=0 (the portable baseline). CI sets NATIVE=0.
 if [[ "$OS" == Darwin ]]; then NATIVE="${NATIVE:-0}"; else NATIVE="${NATIVE:-1}"; fi
 FLAGS+=(-DGGML_NATIVE=$([[ "$NATIVE" == 1 ]] && echo ON || echo OFF))
+# OpenMP on Windows (MSVC vcomp / MinGW libgomp) would need an extra link step digup-llama-sys does not do; build without it.
+case "$OS" in MINGW*|MSYS*|CYGWIN*) IS_WIN=1 ;; *) IS_WIN=0 ;; esac
+[[ "$WIN_ENV" == Windows_NT ]] && IS_WIN=1
+[[ "$IS_WIN" == 1 ]] && FLAGS+=(-DGGML_OPENMP=OFF)
 
 JOBS="$( (nproc || sysctl -n hw.ncpu || echo 4) 2>/dev/null | head -1)"
 echo "llama.cpp $TAG backend=$BACKEND native=$NATIVE jobs=$JOBS -> $BUILD"

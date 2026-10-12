@@ -1,14 +1,14 @@
 //! Decode once, apply EXIF orientation, decide screenshot, thumbnail.
 //! Thumbnails use fast_image_resize (Lanczos3); the embedder-input resize is elsewhere (D4).
 
-use std::io::Cursor;
+use std::io::{Cursor, Read};
 use std::path::Path;
 
 use exif::{In, Reader as ExifReader, Tag, Value};
 use fast_image_resize::{images::Image, FilterType, PixelType, ResizeAlg, ResizeOptions, Resizer};
 use image::codecs::jpeg::JpegEncoder;
 use image::codecs::png::PngEncoder;
-use image::{DynamicImage, ExtendedColorType, ImageEncoder, ImageFormat, RgbImage};
+use image::{DynamicImage, ExtendedColorType, ImageEncoder, ImageFormat, ImageReader, RgbImage};
 
 use crate::screenshot::is_screenshot;
 use crate::{ExtractError, SkipReason};
@@ -48,11 +48,10 @@ pub struct ProcessedImage {
 /// Reads, decodes once, and produces the thumbnail. Screenshots get PNG at max side 1536,
 /// other images JPEG q90 at max side 1024. Images whose longest side is below 256 are `Skipped`.
 pub fn process_image(path: &Path) -> Result<ProcessedImage, ExtractError> {
-    let bytes = std::fs::read(path)?;
+    let bytes = read_capped(path)?;
     let format = detect_format(&bytes)?;
     let (orientation, taken) = read_exif(&bytes);
-    let decoded = image::load_from_memory_with_format(&bytes, format)
-        .map_err(|err| ExtractError::Decode(err.to_string()))?;
+    let decoded = decode_limited(&bytes, format)?;
     drop(bytes);
     let oriented = apply_orientation(decoded, orientation);
     let (width, height) = (oriented.width(), oriented.height());
@@ -74,6 +73,46 @@ pub fn process_image(path: &Path) -> Result<ProcessedImage, ExtractError> {
         is_screenshot: screenshot,
         thumbnail,
     })
+}
+
+/// Largest source file we will read (bytes).
+pub const MAX_IMAGE_FILE_BYTES: u64 = 256 * 1024 * 1024;
+/// Largest accepted width or height (pixels), checked from the header before any pixel allocation.
+pub const MAX_IMAGE_SIDE: u32 = 16384;
+/// Largest decoder allocation (bytes).
+pub const MAX_DECODE_ALLOC: u64 = 256 * 1024 * 1024;
+
+/// Reads the whole file, refusing anything larger than [`MAX_IMAGE_FILE_BYTES`].
+fn read_capped(path: &Path) -> Result<Vec<u8>, ExtractError> {
+    let file = std::fs::File::open(path)?;
+    if file.metadata()?.len() > MAX_IMAGE_FILE_BYTES {
+        return Err(ExtractError::Unsupported(format!(
+            "file larger than {} MiB",
+            MAX_IMAGE_FILE_BYTES / (1024 * 1024)
+        )));
+    }
+    let mut bytes = Vec::new();
+    // Bounded read: the file may have grown since the metadata check.
+    file.take(MAX_IMAGE_FILE_BYTES + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_IMAGE_FILE_BYTES {
+        return Err(ExtractError::Unsupported(format!(
+            "file larger than {} MiB",
+            MAX_IMAGE_FILE_BYTES / (1024 * 1024)
+        )));
+    }
+    Ok(bytes)
+}
+
+/// Decodes with the format already detected, under the dimension and allocation limits.
+fn decode_limited(bytes: &[u8], format: ImageFormat) -> Result<DynamicImage, ExtractError> {
+    // `Limits` is non-exhaustive, so fields are set on the default rather than via a struct literal.
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(MAX_IMAGE_SIDE);
+    limits.max_image_height = Some(MAX_IMAGE_SIDE);
+    limits.max_alloc = Some(MAX_DECODE_ALLOC);
+    let mut reader = ImageReader::with_format(Cursor::new(bytes), format);
+    reader.limits(limits);
+    reader.decode().map_err(|err| ExtractError::Decode(err.to_string()))
 }
 
 /// Scales so the longest side is `max_side` (aspect kept, never upscaled), then encodes.
@@ -178,4 +217,60 @@ fn read_exif(bytes: &[u8]) -> (u16, Option<String>) {
             _ => None,
         });
     (orientation, taken)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn crc32(data: &[u8]) -> u32 {
+        let mut crc = 0xFFFF_FFFFu32;
+        for &b in data {
+            crc ^= u32::from(b);
+            for _ in 0..8 {
+                crc = if crc & 1 != 0 { (crc >> 1) ^ 0xEDB8_8320 } else { crc >> 1 };
+            }
+        }
+        !crc
+    }
+
+    fn encode_png(width: u32, height: u32) -> Vec<u8> {
+        let pixels = vec![0u8; (width * height * 3) as usize];
+        let mut out = Vec::new();
+        PngEncoder::new(&mut out)
+            .write_image(&pixels, width, height, ExtendedColorType::Rgb8)
+            .unwrap();
+        out
+    }
+
+    /// A 1x1 PNG whose IHDR is rewritten to claim `width` x `height` (valid IHDR CRC, no real pixel data).
+    fn png_claiming(width: u32, height: u32) -> Vec<u8> {
+        let mut png = encode_png(1, 1);
+        // Layout: 8-byte signature, 4-byte length, "IHDR" at 12..16, 13 data bytes at 16..29, CRC at 29..33.
+        png[16..20].copy_from_slice(&width.to_be_bytes());
+        png[20..24].copy_from_slice(&height.to_be_bytes());
+        let crc = crc32(&png[12..29]);
+        png[29..33].copy_from_slice(&crc.to_be_bytes());
+        png
+    }
+
+    #[test]
+    fn oversized_png_header_is_rejected_before_allocation() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("huge.png");
+        std::fs::write(&path, png_claiming(40_000, 40_000)).unwrap();
+        let err = process_image(&path).unwrap_err();
+        assert!(matches!(err, ExtractError::Decode(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn normal_png_still_produces_a_thumbnail() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("photo.png");
+        std::fs::write(&path, encode_png(300, 200)).unwrap();
+        let img = process_image(&path).unwrap();
+        assert_eq!((img.width, img.height), (300, 200));
+        assert_eq!(img.thumbnail.format, ThumbFormat::Jpeg);
+        assert_eq!((img.thumbnail.width, img.thumbnail.height), (300, 200));
+    }
 }

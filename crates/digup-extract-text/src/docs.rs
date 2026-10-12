@@ -70,6 +70,26 @@ fn xml_err(e: impl fmt::Display) -> DocError {
     DocError::Format(e.to_string())
 }
 
+/// Largest document file read whole into memory (bytes).
+const MAX_DOC_BYTES: u64 = 64 * 1024 * 1024;
+/// Largest declared and actual uncompressed size of one zip entry (bytes).
+const MAX_ZIP_ENTRY_BYTES: u64 = 64 * 1024 * 1024;
+
+fn too_large(what: &str, limit: u64) -> DocError {
+    DocError::Unsupported(format!("{what} exceeds the {} MiB limit", limit / (1024 * 1024)))
+}
+
+/// Reads at most `limit` bytes of a file; a longer file is an error, not a truncated read.
+fn read_file_capped(path: &Path, limit: u64) -> Result<Vec<u8>, DocError> {
+    let file = fs::File::open(path)?;
+    let mut bytes = Vec::new();
+    file.take(limit + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > limit {
+        return Err(too_large("file", limit));
+    }
+    Ok(bytes)
+}
+
 /// Plain text of a document, dispatched on the file extension (case-insensitive).
 ///
 /// - `txt`, `text`, `md`, `markdown`: UTF-8, falling back to Latin-1 (Swift `readText`).
@@ -86,7 +106,7 @@ pub fn extract_text(path: &Path) -> Result<String, DocError> {
     match ext.as_str() {
         "txt" | "text" | "md" | "markdown" => read_plain(path),
         "html" | "htm" => Ok(plain_text_from_html(&read_plain(path)?)),
-        "rtf" => Ok(rtf_to_text(&fs::read(path)?)),
+        "rtf" => Ok(rtf_to_text(&read_file_capped(path, MAX_DOC_BYTES)?)),
         "docx" => docx_text(path),
         "odt" => odt_text(path),
         "doc" => Err(DocError::Unsupported(
@@ -97,7 +117,7 @@ pub fn extract_text(path: &Path) -> Result<String, DocError> {
 }
 
 fn read_plain(path: &Path) -> Result<String, DocError> {
-    let bytes = fs::read(path)?;
+    let bytes = read_file_capped(path, MAX_DOC_BYTES)?;
     let text = match String::from_utf8(bytes) {
         Ok(s) => s,
         // Latin-1 fallback: every byte is one code point.
@@ -449,12 +469,26 @@ fn push_char(out: &mut Vec<u8>, c: char) {
 // ---------------------------------------------------------------------------------------------
 
 fn read_zip_entry(path: &Path, name: &str) -> Result<String, DocError> {
+    read_zip_entry_limited(path, name, MAX_ZIP_ENTRY_BYTES)
+}
+
+/// Like [`read_zip_entry`] with an explicit size cap. Rejects on the declared size before reading,
+/// and bounds the read itself in case the declared size is wrong.
+fn read_zip_entry_limited(path: &Path, name: &str, limit: u64) -> Result<String, DocError> {
     let file = fs::File::open(path)?;
     let mut archive = zip::ZipArchive::new(file).map_err(xml_err)?;
-    let mut entry = archive.by_name(name).map_err(xml_err)?;
-    let mut xml = String::new();
-    entry.read_to_string(&mut xml)?;
-    Ok(xml)
+    let entry = archive.by_name(name).map_err(xml_err)?;
+    if entry.size() > limit {
+        return Err(too_large(&format!("zip entry {name}"), limit));
+    }
+    let mut buf = Vec::new();
+    entry.take(limit + 1).read_to_end(&mut buf)?;
+    if buf.len() as u64 > limit {
+        return Err(too_large(&format!("zip entry {name}"), limit));
+    }
+    // Same error as `read_to_string` on invalid UTF-8.
+    String::from_utf8(buf)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "stream did not contain valid UTF-8").into())
 }
 
 /// Text of a .docx: `w:t` runs, `w:tab` as a tab, `w:br`/`w:cr` and the end of each `w:p` as `\n`.
@@ -784,5 +818,27 @@ mod tests {
         let path = dir.path().join("old.doc");
         fs::write(&path, b"\xD0\xCF\x11\xE0").unwrap();
         assert!(matches!(extract_text(&path), Err(DocError::Unsupported(_))));
+    }
+
+    #[test]
+    fn capped_file_read_rejects_longer_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cap.txt");
+        fs::write(&path, b"0123456789").unwrap();
+        assert_eq!(read_file_capped(&path, 10).unwrap(), b"0123456789");
+        assert!(matches!(read_file_capped(&path, 9), Err(DocError::Unsupported(_))));
+    }
+
+    #[test]
+    fn zip_entry_over_limit_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("big.docx");
+        let body = "a".repeat(100);
+        write_zip(&path, &[("word/document.xml", &body)]);
+        assert_eq!(read_zip_entry_limited(&path, "word/document.xml", 100).unwrap(), body);
+        assert!(matches!(
+            read_zip_entry_limited(&path, "word/document.xml", 99),
+            Err(DocError::Unsupported(_))
+        ));
     }
 }
