@@ -112,9 +112,14 @@ fn model_ok() -> bool {
 }
 
 #[tauri::command]
-fn search(engine: Eng<'_>, query: String, limit: Option<usize>, kinds: Option<Vec<String>>) -> Res<Vec<HitDto>> {
+async fn search(engine: Eng<'_>, query: String, limit: Option<usize>, kinds: Option<Vec<String>>) -> Res<Vec<HitDto>> {
+    // Model load and inference take hundreds of ms: keep them off the main thread.
+    let engine = Arc::clone(engine.inner());
     let kinds = kinds.filter(|k| !k.is_empty());
-    let hits = engine.search(&query, limit.unwrap_or(30), kinds).map_err(err)?;
+    let hits = tauri::async_runtime::spawn_blocking(move || engine.search(&query, limit.unwrap_or(30), kinds))
+        .await
+        .map_err(err)?
+        .map_err(err)?;
     Ok(hits.into_iter().map(hit_dto).collect())
 }
 
@@ -134,16 +139,18 @@ async fn folders(engine: Eng<'_>) -> Res<Vec<String>> {
 }
 
 #[tauri::command]
-fn add_folder(engine: Eng<'_>, path: String) -> Res<()> {
+async fn add_folder(engine: Eng<'_>, path: String) -> Res<()> {
     if !std::path::Path::new(&path).is_dir() {
         return Err("not a directory".into());
     }
-    engine.add_folder(PathBuf::from(path)).map_err(err)
+    let engine = Arc::clone(engine.inner());
+    tauri::async_runtime::spawn_blocking(move || engine.add_folder(PathBuf::from(path))).await.map_err(err)?.map_err(err)
 }
 
 #[tauri::command]
-fn remove_folder(engine: Eng<'_>, path: String) -> Res<()> {
-    engine.remove_folder(std::path::Path::new(&path)).map_err(err)
+async fn remove_folder(engine: Eng<'_>, path: String) -> Res<()> {
+    let engine = Arc::clone(engine.inner());
+    tauri::async_runtime::spawn_blocking(move || engine.remove_folder(std::path::Path::new(&path))).await.map_err(err)?.map_err(err)
 }
 
 /// Pure core: the candidates that are existing directories, in their given order, as strings.
@@ -165,8 +172,9 @@ async fn pick_folder(app: AppHandle) -> Res<Option<String>> {
 }
 
 #[tauri::command]
-fn start_indexing(engine: Eng<'_>) -> Res<()> {
-    engine.start_indexing().map_err(err)
+async fn start_indexing(engine: Eng<'_>) -> Res<()> {
+    let engine = Arc::clone(engine.inner());
+    tauri::async_runtime::spawn_blocking(move || engine.start_indexing()).await.map_err(err)?.map_err(err)
 }
 
 #[tauri::command]
@@ -238,6 +246,8 @@ fn checked_path(engine: &Engine, path: &str) -> Res<PathBuf> {
 #[tauri::command]
 async fn open_hit(app: AppHandle, engine: Eng<'_>, path: String, kind: String, loc: Option<f64>, query: String) -> Res<()> {
     let p = checked_path(&engine, &path)?;
+    // Feeds ranking and indexing order when the user turned open-history on; a no-op otherwise. Never blocks the open.
+    let _ = engine.record_open(&path);
     let handle = app.clone();
     tauri::async_runtime::spawn_blocking(move || opener::open_at(&handle, &p, &kind, loc, &query)).await.map_err(err)?
 }
@@ -397,8 +407,20 @@ fn main() {
             search, status, counts, folders, add_folder, remove_folder, suggested_folders, pick_folder, start_indexing,
             pause, resume, model_present, download_models, open_hit, reveal_path, quit, thumbnail
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running DigUp");
+        .build(tauri::generate_context!())
+        .expect("error while building DigUp")
+        .run(|app, event| {
+            // Dock click while the window is hidden brings it back (macOS).
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen { has_visible_windows: false, .. } = event {
+                if let Some(w) = app.get_webview_window("main") {
+                    let _ = w.show();
+                    let _ = w.set_focus();
+                }
+            }
+            #[cfg(not(target_os = "macos"))]
+            let _ = (app, event);
+        });
 }
 
 #[cfg(test)]
