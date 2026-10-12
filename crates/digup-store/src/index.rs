@@ -116,6 +116,11 @@ impl IndexStore {
         Ok(Self { conn, file, scope: None })
     }
 
+    /// Gives up the store for its connection (a cached `Searcher` owns one).
+    pub fn into_connection(self) -> Connection {
+        self.conn
+    }
+
     /// The underlying connection, for read-only use by the searcher.
     pub fn connection(&self) -> &Connection {
         &self.conn
@@ -458,6 +463,79 @@ impl IndexStore {
         counts.segments = segments as usize;
         counts.vectors = vectors as usize;
         Ok(counts)
+    }
+
+    // MARK: content duplicates
+
+    /// Indexed files (state `done`, not code) whose size is in `sizes`: the only files a new file's bytes can equal.
+    /// One scan of the done rows, keeping only the sizes asked for.
+    pub fn done_files_with_sizes(&self, sizes: &std::collections::HashSet<i64>) -> Result<Vec<FileRecord>> {
+        let mut stmt = self.conn.prepare_cached(&format!(
+            "SELECT {FILE_COLUMNS} FROM files WHERE state = 'done' AND kind != 'code' ORDER BY id"
+        ))?;
+        let mut out = Vec::new();
+        for row in stmt.query_map([], file_record)? {
+            let file = row?;
+            if sizes.contains(&file.size) {
+                out.push(file);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Sets one string key of a file's `info` object and keeps its other keys.
+    pub fn set_info_value(&self, id: i64, key: &str, value: &str) -> Result<()> {
+        self.conn
+            .prepare_cached("UPDATE files SET info = json_set(COALESCE(info, '{}'), '$.' || ?2, ?3) WHERE id = ?1")?
+            .execute(params![id, key, value])?;
+        Ok(())
+    }
+
+    /// Gives `target` (state `pending`) a copy of the indexed content of `source` (state `done`, same bytes): every
+    /// non-name segment with its vector and keyword row, the source's `detail`, and `info` as given. One transaction.
+    /// The copies are independent rows, so either file can later be changed or deleted alone; `target` keeps its own
+    /// name row. Returns false, changing nothing, when either file is not in the expected state.
+    pub fn copy_indexed_content(&mut self, source: i64, target: i64, info: &BTreeMap<String, String>) -> Result<bool> {
+        let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let states: Vec<(i64, String)> = {
+            let mut stmt = tx.prepare("SELECT id, state FROM files WHERE id IN (?1, ?2)")?;
+            let rows = stmt.query_map(params![source, target], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        let state_of = |id: i64| states.iter().find(|(i, _)| *i == id).map(|(_, s)| s.as_str());
+        if state_of(source) != Some("done") || state_of(target) != Some("pending") {
+            return Ok(false);
+        }
+        delete_segments(&tx, target, true)?;
+        type Row = (String, String, Option<f64>, Option<f64>, Option<String>, Option<Vec<u8>>, Option<String>, Option<String>, Option<String>);
+        let copies: Vec<Row> = {
+            let mut stmt = tx.prepare(
+                "SELECT s.kind, s.modality, s.loc, s.loc_end, s.excerpt, s.vec, f.name, f.body, f.original \
+                 FROM segments s LEFT JOIN fts f ON f.rowid = s.id WHERE s.file = ?1 AND s.kind != 'name' ORDER BY s.id",
+            )?;
+            let rows = stmt.query_map([source], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?))
+            })?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        for (kind, modality, loc, loc_end, excerpt, vec, name, body, original) in copies {
+            tx.prepare_cached(
+                "INSERT INTO segments(file, kind, modality, loc, loc_end, excerpt, vec) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            )?
+            .execute(params![target, kind, modality, loc, loc_end, excerpt, vec])?;
+            let id = tx.last_insert_rowid();
+            if let Some(body) = body {
+                tx.prepare_cached("INSERT INTO fts(rowid, name, body, original) VALUES(?1, ?2, ?3, ?4)")?
+                    .execute(params![id, name, body, original])?;
+            }
+        }
+        let detail: Option<String> = tx.query_row("SELECT detail FROM files WHERE id = ?1", [source], |r| r.get(0))?;
+        let json = if info.is_empty() { None } else { Some(serde_json::to_string(info)?) };
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0);
+        tx.prepare_cached("UPDATE files SET state = 'done', detail = ?1, info = ?2, indexed_at = ?3 WHERE id = ?4")?
+            .execute(params![detail, json, now, target])?;
+        tx.commit()?;
+        Ok(true)
     }
 
     // MARK: helpers
@@ -943,5 +1021,96 @@ mod tests {
         s.finish(1, FileState::Done, Some("ok"), &info).unwrap();
         assert_eq!(s.info(1).unwrap(), info);
         assert_eq!(s.info(99).unwrap(), BTreeMap::new());
+    }
+
+    // MARK: content duplicates
+
+    fn sized(path: &str, kind: FileKind, size: i64) -> NewFile {
+        NewFile { path: path.into(), kind, size, mtime: 1.0, inode: 1, device: 1 }
+    }
+
+    #[test]
+    fn done_files_with_sizes_filters_by_state_kind_and_size() {
+        let dir = TempDir::new();
+        let mut s = store(&dir);
+        let done = s.insert_file(&sized("/a/doc", FileKind::Doc, 10), &[text_segment("x")]).unwrap();
+        s.finish(done, FileState::Done, None, &BTreeMap::new()).unwrap();
+        let other_size = s.insert_file(&sized("/a/big", FileKind::Doc, 20), &[text_segment("y")]).unwrap();
+        s.finish(other_size, FileState::Done, None, &BTreeMap::new()).unwrap();
+        let code = s.insert_file(&sized("/a/code.rs", FileKind::Code, 10), &[text_segment("z")]).unwrap();
+        s.finish(code, FileState::Done, None, &BTreeMap::new()).unwrap();
+        s.insert_file(&sized("/a/pending", FileKind::Doc, 10), &[text_segment("w")]).unwrap();
+
+        let sizes: std::collections::HashSet<i64> = [10].into_iter().collect();
+        assert_eq!(strings(s.done_files_with_sizes(&sizes).unwrap()), vec!["/a/doc".to_string()]);
+        let none: std::collections::HashSet<i64> = std::collections::HashSet::new();
+        assert!(s.done_files_with_sizes(&none).unwrap().is_empty());
+    }
+
+    #[test]
+    fn set_info_value_keeps_other_keys() {
+        let dir = TempDir::new();
+        let s = store(&dir);
+        let id = s.conn.execute("INSERT INTO files(path, kind, size, mtime, inode, device) VALUES('/x', 'doc', 1, 1, 1, 1)", []).unwrap();
+        assert_eq!(id, 1);
+        s.set_info_value(1, "content_hash", "abc").unwrap();
+        assert_eq!(s.info(1).unwrap().get("content_hash").map(String::as_str), Some("abc"));
+        let mut info = BTreeMap::new();
+        info.insert("pages".to_string(), "3".to_string());
+        s.conn.execute("UPDATE files SET info = ?1 WHERE id = 1", [serde_json::to_string(&info).unwrap()]).unwrap();
+        s.set_info_value(1, "content_size", "1").unwrap();
+        let got = s.info(1).unwrap();
+        assert_eq!(got.get("pages").map(String::as_str), Some("3"));
+        assert_eq!(got.get("content_size").map(String::as_str), Some("1"));
+    }
+
+    #[test]
+    fn copy_indexed_content_copies_rows_and_survives_source_delete() {
+        let dir = TempDir::new();
+        let mut s = store(&dir);
+        let src = s.insert_file(&sized("/a/src", FileKind::Image, 10), &[text_segment("needle"), vector_segment(0.3)]).unwrap();
+        s.finish(src, FileState::Done, Some("ok"), &BTreeMap::new()).unwrap();
+        let dst = s.insert_file(&sized("/a/dst", FileKind::Image, 10), &[]).unwrap();
+        s.requeue(dst, None).unwrap();
+        let mut info = BTreeMap::new();
+        info.insert("content_hash".to_string(), "h".to_string());
+
+        assert!(s.copy_indexed_content(src, dst, &info).unwrap());
+        assert_eq!(scalar(&s, &format!("SELECT COUNT(*) FROM segments WHERE file = {dst} AND kind != 'name'")), 2);
+        assert_eq!(scalar(&s, &format!("SELECT COUNT(*) FROM segments WHERE file = {dst} AND vec IS NOT NULL")), 1);
+        assert_eq!(scalar(&s, &format!("SELECT COUNT(*) FROM segments WHERE file = {dst} AND kind = 'name'")), 1, "the name row stays with the target");
+        let matched: i64 = s.conn.query_row(
+            &format!("SELECT COUNT(*) FROM fts JOIN segments g ON g.id = fts.rowid WHERE fts MATCH 'needle' AND g.file = {dst}"),
+            [],
+            |r| r.get(0),
+        ).unwrap();
+        assert_eq!(matched, 1);
+        let state: String = s.conn.query_row("SELECT state FROM files WHERE id = ?1", [dst], |r| r.get(0)).unwrap();
+        assert_eq!(state, "done");
+        let detail: Option<String> = s.conn.query_row("SELECT detail FROM files WHERE id = ?1", [dst], |r| r.get(0)).unwrap();
+        assert_eq!(detail.as_deref(), Some("ok"));
+        assert_eq!(s.info(dst).unwrap(), info);
+
+        s.delete_file(src).unwrap();
+        assert_eq!(scalar(&s, &format!("SELECT COUNT(*) FROM segments WHERE file = {dst} AND kind != 'name'")), 2, "the copy survives the source");
+        assert_eq!(scalar(&s, &format!("SELECT COUNT(*) FROM fts WHERE rowid IN (SELECT id FROM segments WHERE file = {dst})")), 2, "its own name row plus the copied body");
+    }
+
+    #[test]
+    fn copy_indexed_content_refuses_wrong_states() {
+        let dir = TempDir::new();
+        let mut s = store(&dir);
+        let pending_src = s.insert_file(&sized("/a/p", FileKind::Image, 10), &[text_segment("a")]).unwrap();
+        let dst = s.insert_file(&sized("/a/d", FileKind::Image, 10), &[]).unwrap();
+        s.requeue(dst, None).unwrap();
+        let none = BTreeMap::new();
+        assert!(!s.copy_indexed_content(pending_src, dst, &none).unwrap(), "source must be done");
+        s.finish(pending_src, FileState::Done, None, &none).unwrap();
+        let done_target = s.insert_file(&sized("/a/t", FileKind::Image, 10), &[text_segment("b")]).unwrap();
+        s.finish(done_target, FileState::Done, None, &none).unwrap();
+        let before = scalar(&s, "SELECT COUNT(*) FROM segments");
+        assert!(!s.copy_indexed_content(pending_src, done_target, &none).unwrap(), "target must be pending");
+        assert_eq!(scalar(&s, "SELECT COUNT(*) FROM segments"), before, "nothing changed");
+        assert!(!s.copy_indexed_content(pending_src, 999, &none).unwrap(), "missing target");
     }
 }

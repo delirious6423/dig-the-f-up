@@ -24,4 +24,5 @@ digup-extract-video = { path = "../digup-extract-video" }
 digup-ocr = { path = "../digup-ocr" }
 digup-embed = { path = "../digup-embed", optional = true }
 serde_json = "1"
+blake3 = "1"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }

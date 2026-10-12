@@ -49,6 +49,8 @@ impl Ocr for NoOcr {
 pub struct Job {
     pub file: FileRecord,
     pub step: Option<Range<usize>>,
+    /// blake3 of the file's bytes, set when the file was hashed for deduplication. Commit stores it in `info`.
+    pub content_hash: Option<String>,
 }
 
 /// Why a file was not indexed. `Skipped` is normal (too small, no text); `Failed` is an error.

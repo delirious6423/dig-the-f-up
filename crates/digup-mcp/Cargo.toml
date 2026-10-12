@@ -1,0 +1,16 @@
+[package]
+name = "digup-mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+digup-engine = { path = "../digup-engine" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+digup-index = { path = "../digup-index" }
+tempfile = { workspace = true }

@@ -10,11 +10,12 @@ use digup_embed::{Embedder, Options};
 use digup_index::run::{check_model, finish_long_files, run, Event};
 use digup_index::sync::sync;
 use digup_index::{IndexOptions, SystemOcr};
+use digup_search::filters;
 use digup_search::{SearchOptions, Searcher};
 use digup_store::index::{IndexStore, CODE_FILE, MAIN_FILE};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 struct Args {
     flags: HashSet<String>,
@@ -22,7 +23,7 @@ struct Args {
     positional: Vec<String>,
 }
 
-const VALUE_FLAGS: &[&str] = &["--index", "--limit", "-n", "--kinds", "--zgate", "--word-weight"];
+const VALUE_FLAGS: &[&str] = &["--index", "--limit", "-n", "--kinds", "--zgate", "--word-weight", "--settings"];
 
 fn parse(raw: &[String]) -> Args {
     let mut a = Args { flags: HashSet::new(), values: Default::default(), positional: Vec::new() };
@@ -167,6 +168,14 @@ fn cmd_search(args: &Args) -> Result<()> {
             bail!("search the code for what?");
         }
     }
+    // `ext:`, `size:` and `mtime:` terms restrict hits before the limit; the engine does the same in `search`.
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f64());
+    let (text, filters) = filters::parse(&query, now);
+    query = text.trim().to_string();
+    if query.is_empty() && filters.is_empty() {
+        bail!("search for what?");
+    }
+    let z_gate = if query.is_empty() { f64::NEG_INFINITY } else { SearchOptions::default().z_gate };
     let store = IndexStore::open(&args.index_dir(), if code { CODE_FILE } else { MAIN_FILE })?;
     let searcher = Searcher::with_code(store.connection(), code)?;
     let started = Instant::now();
@@ -180,6 +189,8 @@ fn cmd_search(args: &Args) -> Result<()> {
     let opts = SearchOptions {
         kinds,
         limit: args.values.get("-n").and_then(|v| v.parse().ok()).unwrap_or(10),
+        filters: filters.clone(),
+        z_gate,
         ..SearchOptions::default()
     };
     let hits = searcher.search(&vector, &query, &opts)?;
@@ -205,6 +216,9 @@ fn cmd_search(args: &Args) -> Result<()> {
             .collect();
         println!("{}", serde_json::to_string_pretty(&rows)?);
         return Ok(());
+    }
+    if !filters.is_empty() {
+        println!("filters: {}", filters.describe());
     }
     if hits.is_empty() {
         println!("no good matches");
@@ -253,16 +267,32 @@ fn cmd_status(args: &Args) -> Result<()> {
     Ok(())
 }
 
+/// Serves the index to AI agents over the Model Context Protocol on stdin/stdout (`digup mcp --index DIR`). Read-only:
+/// the tools search the index and report its status; they never index, add folders or open files. `--settings FILE`
+/// names the settings file (the indexed folders); without it the app's `settings.json` beside an `index/` folder is used. Add it to an agent
+/// as a stdio server, e.g. `claude mcp add digup -- digup mcp --index ~/.digup`.
+fn cmd_mcp(args: &Args) -> Result<()> {
+    let dir = args.index_dir();
+    // The desktop app keeps `settings.json` (the indexed folders) next to its `index/` folder; use it when the index
+    // is the app's, so the `folders` tool and the removed-folder filter match what the app shows.
+    let app_settings = dir.parent().map(|p| p.join("settings.json")).filter(|p| dir.file_name().is_some_and(|n| n == "index") && p.exists());
+    let settings_file = args.values.get("--settings").map(PathBuf::from).or(app_settings).unwrap_or_else(|| dir.join("mcp-settings.json"));
+    let cfg = digup_engine::EngineConfig { index_dir: dir, settings_file };
+    let engine = std::sync::Arc::new(digup_engine::Engine::open(cfg)?);
+    digup_mcp::serve_stdio(engine)
+}
+
 fn main() -> Result<()> {
     let raw: Vec<String> = std::env::args().skip(1).collect();
     let Some(cmd) = raw.first() else {
-        bail!("usage: digup <index|search|status|eval|estimate|download> [--index DIR] [--code] ...");
+        bail!("usage: digup <index|search|status|mcp|eval|estimate|download> [--index DIR] [--code] ...");
     };
     let args = parse(&raw[1..]);
     match cmd.as_str() {
         "index" => cmd_index(&args),
         "search" => cmd_search(&args),
         "status" => cmd_status(&args),
+        "mcp" => cmd_mcp(&args),
         "download" => cmd_download(),
         "estimate" => {
             if args.positional.is_empty() {

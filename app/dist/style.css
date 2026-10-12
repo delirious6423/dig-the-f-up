@@ -46,3 +46,19 @@ progress{width:140px;vertical-align:middle;margin-left:8px}
 #welcomeChoices{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px}
 #indexCounts{font-size:12px;margin:0 0 8px;padding:0}
 #pauseBtn{margin-bottom:8px}
+
+.pill{font-size:12px;padding:2px 10px;border-radius:999px;white-space:nowrap;align-self:center;border-color:transparent}
+.pill[data-tone="ok"]{background:color-mix(in srgb,#2e9e5b 18%,transparent);color:#2e9e5b}
+.pill[data-tone="busy"]{background:color-mix(in srgb,var(--acc) 18%,transparent);color:var(--acc)}
+.pill[data-tone="wait"]{background:color-mix(in srgb,#d98a00 20%,transparent);color:#b87400}
+.pill[data-tone="off"]{background:var(--line);color:var(--dim)}
+@media (prefers-color-scheme:dark){.pill[data-tone="ok"]{color:#5fd68a}.pill[data-tone="wait"]{color:#f0b040}}
+#liveBanner{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:6px 12px;border-bottom:1px solid var(--line);background:color-mix(in srgb,#d98a00 14%,transparent);font-size:13px}
+#liveBanner[hidden]{display:none}
+#folders .setting{margin:0 0 12px}
+#folders .setting label{display:block;margin:0 0 4px}
+#folders .setting label.sub{margin:6px 0 0 22px;color:var(--dim);font-size:12px}
+#folders select{font:inherit;margin-left:6px;padding:2px 4px;background:var(--bg);color:var(--fg);border:1px solid var(--line);border-radius:6px}
+#folders .hint{font-size:12px;margin:4px 0 0 22px;padding:0}
+#folders .setting button{margin:6px 0 0 22px}
+#syncNow{white-space:nowrap}

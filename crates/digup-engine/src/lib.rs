@@ -5,16 +5,18 @@ use anyhow::{anyhow, bail, Context, Result};
 use digup_core::{query_prompt, FileKind, SegmentKind};
 use digup_index::service::{Control, NotReady, Part, Service, ServiceEvent};
 use digup_index::{Embed, IndexOptions, SystemOcr};
+use digup_search::searcher::OwnedSearcher;
+use digup_search::filters;
 use digup_search::{SearchHit, SearchOptions, Searcher};
 use digup_store::index::{IndexStore, CODE_FILE, MAIN_FILE};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub type EmbedderFactory = Box<dyn Fn() -> Result<Box<dyn Embed>> + Send + Sync>;
 pub type QueryEncoder = Box<dyn Fn(&str) -> Result<Vec<f32>> + Send + Sync>;
@@ -68,10 +70,99 @@ pub enum EngineEvent {
     Stopped,
 }
 
-#[derive(Serialize, Deserialize, Default)]
+#[derive(Serialize, Deserialize)]
 struct Settings {
     #[serde(default)]
     folders: Vec<PathBuf>,
+    /// Keep the index fresh from filesystem events while indexing is wanted.
+    #[serde(default = "yes")]
+    watch: bool,
+    #[serde(default)]
+    watch_policy: WatchPolicy,
+    /// Remember which files are opened so they rank and index earlier. Off until the user turns it on; the history
+    /// stays in `usage.sqlite` next to the index and never leaves the machine.
+    #[serde(default)]
+    usage_tracking: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self { folders: Vec::new(), watch: true, watch_policy: WatchPolicy::default(), usage_tracking: false }
+    }
+}
+
+/// When filesystem changes may start a sync. Changes are always recorded; this only gates when the (battery-hungry)
+/// embedding runs. The default keeps a laptop on battery quiet.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum WatchPolicy {
+    /// Sync as changes settle, on any power source.
+    Live,
+    /// Sync only on AC power and outside Low Power Mode; changes wait otherwise.
+    #[default]
+    PluggedIn,
+    /// Never sync on its own; the periodic and manual syncs still work.
+    Manual,
+}
+
+impl WatchPolicy {
+    /// The name used in the settings file and by front ends: `live`, `plugged_in` or `manual`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            WatchPolicy::Live => "live",
+            WatchPolicy::PluggedIn => "plugged_in",
+            WatchPolicy::Manual => "manual",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<WatchPolicy> {
+        match s {
+            "live" => Some(WatchPolicy::Live),
+            "plugged_in" => Some(WatchPolicy::PluggedIn),
+            "manual" => Some(WatchPolicy::Manual),
+            _ => None,
+        }
+    }
+
+    fn power_policy(self) -> digup_watch::PowerPolicy {
+        match self {
+            WatchPolicy::Live => digup_watch::PowerPolicy::Live,
+            WatchPolicy::PluggedIn => digup_watch::PowerPolicy::PluggedInOnly,
+            WatchPolicy::Manual => digup_watch::PowerPolicy::Manual,
+        }
+    }
+}
+
+/// What the watcher is doing, for a status line.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct WatchInfo {
+    pub running: bool,
+    /// "events", or why only the periodic re-sync runs.
+    pub mode: String,
+    /// Changes recorded and waiting for conditions to allow a sync.
+    pub pending: usize,
+    /// Why they are waiting ("on battery", ...), if they are.
+    pub deferred: Option<String>,
+}
+
+/// Forwards the watcher's sync requests to the indexing thread. Holds the engine weakly: the engine owns the watcher.
+struct EngineSink(Weak<Inner>);
+
+impl digup_watch::SyncSink for EngineSink {
+    fn request_sync(&self) {
+        if let Some(inner) = self.0.upgrade() {
+            // A running service takes the request; one that went idle and exited is started again.
+            if inner.wanted.load(Ordering::SeqCst) && !inner.paused.load(Ordering::SeqCst) {
+                if let Err(e) = inner.spawn() {
+                    inner.emit(EngineEvent::Error(format!("{e:#}")));
+                }
+            }
+        }
+    }
 }
 
 struct Inner {
@@ -79,6 +170,14 @@ struct Inner {
     settings: Mutex<Settings>,
     factory: Arc<dyn Fn() -> Result<Box<dyn Embed>> + Send + Sync>,
     query_encoder: QueryEncoder,
+    /// Searchers kept between queries (main index, code index): loading every vector is the cost of building one,
+    /// so it is paid once per index change instead of once per query. See `Inner::with_searcher`.
+    main_searcher: Mutex<Option<OwnedSearcher>>,
+    code_searcher: Mutex<Option<OwnedSearcher>>,
+    /// How many times a cached searcher was (re)built; for tests and diagnostics.
+    searcher_loads: AtomicUsize,
+    watcher: Mutex<Option<digup_watch::Watcher>>,
+    usage: Mutex<Option<digup_usage::UsageStore>>,
     status: Mutex<Status>,
     subscribers: Mutex<Vec<Sender<EngineEvent>>>,
     control: Mutex<Control>,
@@ -97,6 +196,26 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 impl Inner {
+    /// Runs `f` with the cached searcher of the main or code index, rebuilding it first when the index changed since
+    /// it was loaded (another connection committed: the indexing thread, or another process). The lock is held
+    /// during `f`, which serialises searches; a scan is milliseconds, so that is cheaper than a second copy of the
+    /// vectors.
+    fn with_searcher<R>(&self, code: bool, f: impl FnOnce(&Searcher<'static>) -> Result<R>) -> Result<R> {
+        let slot = if code { &self.code_searcher } else { &self.main_searcher };
+        let mut guard = lock(slot);
+        let fresh = match guard.as_ref() {
+            Some(s) => s.is_current()?,
+            None => false,
+        };
+        if !fresh {
+            *guard = None; // drop the old vectors before loading the new ones
+            let store = IndexStore::open(&self.cfg.index_dir, if code { CODE_FILE } else { MAIN_FILE })?;
+            *guard = Some(Searcher::with_owned_connection(store.into_connection(), code)?);
+            self.searcher_loads.fetch_add(1, Ordering::SeqCst);
+        }
+        f(guard.as_ref().expect("loaded above"))
+    }
+
     fn emit(&self, e: EngineEvent) {
         lock(&self.subscribers).retain(|s| s.send(e.clone()).is_ok());
     }
@@ -151,13 +270,18 @@ impl Inner {
         if let Some(h) = slot.as_ref() {
             if !h.is_finished() {
                 lock(&self.control).request_sync();
-                return Ok(());
+                // The service may have timed out and returned just before the request landed; if so, fall through
+                // and start a new one (it begins with a sync) instead of losing the request.
+                if !h.is_finished() {
+                    return Ok(());
+                }
             }
         }
         if let Some(h) = slot.take() {
             let _ = h.join();
         }
         let roots = lock(&self.settings).folders.clone();
+        let priority = self.priority();
         let control = Control::new(self.backfill.load(Ordering::SeqCst));
         *lock(&self.control) = control.clone();
         let me = self.clone();
@@ -167,7 +291,8 @@ impl Inner {
                 let result = (|| -> Result<()> {
                     let store = IndexStore::open(&dir, MAIN_FILE)?;
                     let main = Part { store, roots, code: false, keep_only: true };
-                    let mut service = Service::new(main, None, IndexOptions::default(), control);
+                    let opts = IndexOptions { priority, ..IndexOptions::default() };
+                    let mut service = Service::new(main, None, opts, control);
                     let factory = me.factory.clone();
                     let mut make = move || factory();
                     let mut on_event = |e: ServiceEvent| me.handle(e);
@@ -183,6 +308,58 @@ impl Inner {
             })?,
         );
         Ok(())
+    }
+
+    fn now() -> f64 {
+        SystemTime::now().duration_since(UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f64())
+    }
+
+    /// Runs `f` on the usage history, opening `usage.sqlite` on first use.
+    fn with_usage<R>(&self, f: impl FnOnce(&digup_usage::UsageStore) -> Result<R>) -> Result<R> {
+        let mut g = lock(&self.usage);
+        if g.is_none() {
+            *g = Some(digup_usage::UsageStore::open(&self.cfg.index_dir.join("usage.sqlite"))?);
+        }
+        f(g.as_ref().expect("opened above"))
+    }
+
+    /// Frecency of the user's most opened files, for indexing them first. Empty unless usage tracking is on.
+    fn priority(&self) -> Option<Arc<HashMap<String, f64>>> {
+        if !lock(&self.settings).usage_tracking {
+            return None;
+        }
+        let top = self.with_usage(|u| u.top(5000, Self::now())).ok()?;
+        (!top.is_empty()).then(|| Arc::new(top.into_iter().collect()))
+    }
+
+    fn start_watcher(self: &Arc<Self>) {
+        let (enabled, policy, roots) = {
+            let s = lock(&self.settings);
+            (s.watch, s.watch_policy, s.folders.clone())
+        };
+        // Stop a running one first, outside the lock: its drop joins a thread that may be inside `request_sync`.
+        self.stop_watcher();
+        if !enabled || roots.is_empty() {
+            return;
+        }
+        let cfg = digup_watch::WatchConfig { policy: policy.power_policy(), ..Default::default() };
+        let sink = Arc::new(EngineSink(Arc::downgrade(self)));
+        match digup_watch::Watcher::start(
+            &roots,
+            cfg,
+            sink,
+            digup_watch::default_power_source(),
+            Arc::new(digup_watch::SystemClock::new()),
+        ) {
+            Ok(w) => *lock(&self.watcher) = Some(w),
+            Err(e) => self.emit(EngineEvent::Error(format!("file watcher: {e:#}"))),
+        }
+    }
+
+    fn stop_watcher(&self) {
+        // Dropped outside the lock: the watcher's thread may be inside `request_sync` -> `spawn`.
+        let w = lock(&self.watcher).take();
+        drop(w);
     }
 
     fn halt(&self) {
@@ -283,6 +460,11 @@ impl Engine {
                 settings: Mutex::new(settings),
                 factory: Arc::from(factory),
                 query_encoder,
+                main_searcher: Mutex::new(None),
+                code_searcher: Mutex::new(None),
+                searcher_loads: AtomicUsize::new(0),
+                watcher: Mutex::new(None),
+                usage: Mutex::new(None),
                 status: Mutex::new(Status::Ready),
                 subscribers: Mutex::new(Vec::new()),
                 control: Mutex::new(Control::new(true)),
@@ -331,6 +513,7 @@ impl Engine {
         if self.inner.wanted.load(Ordering::SeqCst) {
             self.inner.halt();
             self.inner.spawn()?;
+            self.inner.start_watcher(); // the roots changed
         }
         Ok(())
     }
@@ -340,19 +523,28 @@ impl Engine {
             Some(t) => (t, true),
             None => (query.trim().to_string(), false),
         };
-        if text.is_empty() {
+        // `ext:`, `size:` and `mtime:` terms are taken out of the text and applied to candidates before the limit.
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f64());
+        let (text, filters) = filters::parse(&text, now);
+        let text = text.trim().to_string();
+        if text.is_empty() && filters.is_empty() {
             return Ok(Vec::new());
         }
-        let store = IndexStore::open(&self.inner.cfg.index_dir, if code { CODE_FILE } else { MAIN_FILE })?;
-        let searcher = Searcher::with_code(store.connection(), code)?;
+        // A filter-only query has no words, so every indexed file is a candidate and the filters alone decide.
+        // Their order is by meaning against the empty query; the gate is open so no file is cut before the filters.
+        let z_gate = if text.is_empty() { f64::NEG_INFINITY } else { SearchOptions::default().z_gate };
         let vector = (self.inner.query_encoder)(&query_prompt(&text, code))?;
         let kinds: Option<HashSet<FileKind>> =
             kinds.map(|k| k.iter().filter_map(|s| FileKind::parse(s.trim())).collect());
-        let opts = SearchOptions { kinds, limit, ..SearchOptions::default() };
-        let hits = searcher.search(&vector, &text, &opts)?;
+        // With usage tracking on, files the user opens often get a small bonus. It can only reorder what the search
+        // returned, so a few extra hits are fetched for it to choose from; with tracking off nothing changes.
+        let tracking = lock(&self.inner.settings).usage_tracking;
+        let fetch = if tracking { (limit * 3).min(150).max(limit) } else { limit };
+        let opts = SearchOptions { kinds, limit: fetch, filters, z_gate, ..SearchOptions::default() };
+        let hits = self.inner.with_searcher(code, |searcher| searcher.search(&vector, &text, &opts))?;
         // A removed folder stays in the index until the next prune; hide its hits meanwhile.
         let roots = self.folders();
-        Ok(hits
+        let mut out: Vec<Hit> = hits
             .iter()
             .filter(|h| roots.is_empty() || roots.iter().any(|r| Path::new(&h.path).starts_with(r)))
             .map(|h| Hit {
@@ -365,7 +557,86 @@ impl Engine {
                 loc: h.loc,
                 focus: h.focus,
             })
-            .collect())
+            .collect();
+        if tracking && !out.is_empty() {
+            let paths: Vec<&str> = out.iter().map(|h| h.path.as_str()).collect();
+            // A history that cannot be read must not break search: fall back to the plain order.
+            if let Ok(scores) = self.inner.with_usage(|u| u.scores(&paths, Inner::now())) {
+                for h in &mut out {
+                    h.score += digup_usage::boost(scores.get(&h.path).copied().unwrap_or(0.0));
+                }
+                out.sort_by(|a, b| b.score.total_cmp(&a.score));
+            }
+        }
+        out.truncate(limit);
+        Ok(out)
+    }
+
+    /// Records that the user opened `path` from a result, if usage tracking is on (it is off by default).
+    pub fn record_open(&self, path: &str) -> Result<()> {
+        if !lock(&self.inner.settings).usage_tracking {
+            return Ok(());
+        }
+        self.inner.with_usage(|u| u.record_open(path, Inner::now()))
+    }
+
+    pub fn usage_tracking(&self) -> bool {
+        lock(&self.inner.settings).usage_tracking
+    }
+
+    /// Turns open-history on or off. Turning it off also deletes the history.
+    pub fn set_usage_tracking(&self, on: bool) -> Result<()> {
+        {
+            let mut s = lock(&self.inner.settings);
+            if s.usage_tracking == on {
+                return Ok(());
+            }
+            s.usage_tracking = on;
+            self.inner.save(&s)?;
+        }
+        if !on {
+            self.clear_usage()?;
+        }
+        Ok(())
+    }
+
+    pub fn clear_usage(&self) -> Result<()> {
+        self.inner.with_usage(|u| u.clear())
+    }
+
+    /// Whether the file watcher is on and under which power policy.
+    pub fn watch_settings(&self) -> (bool, WatchPolicy) {
+        let s = lock(&self.inner.settings);
+        (s.watch, s.watch_policy)
+    }
+
+    /// Changes the watcher settings; a running watcher is restarted with them.
+    pub fn set_watch(&self, enabled: bool, policy: WatchPolicy) -> Result<()> {
+        {
+            let mut s = lock(&self.inner.settings);
+            s.watch = enabled;
+            s.watch_policy = policy;
+            self.inner.save(&s)?;
+        }
+        if self.inner.wanted.load(Ordering::SeqCst) {
+            self.inner.start_watcher();
+        }
+        Ok(())
+    }
+
+    pub fn watch_info(&self) -> WatchInfo {
+        match lock(&self.inner.watcher).as_ref() {
+            None => WatchInfo::default(),
+            Some(w) => WatchInfo {
+                running: true,
+                mode: match w.mode() {
+                    digup_watch::Mode::Events => "events".into(),
+                    digup_watch::Mode::PeriodicOnly { reason } => format!("periodic re-sync only ({reason})"),
+                },
+                pending: w.pending_count(),
+                deferred: w.deferred_reason().map(|r| r.to_string()),
+            },
+        }
     }
 
     pub fn counts(&self) -> Result<IndexCounts> {
@@ -396,13 +667,18 @@ impl Engine {
     pub fn start_indexing(&self) -> Result<()> {
         self.inner.paused.store(false, Ordering::SeqCst);
         self.inner.wanted.store(true, Ordering::SeqCst);
-        self.inner.spawn()
+        self.inner.spawn()?;
+        if lock(&self.inner.watcher).is_none() {
+            self.inner.start_watcher();
+        }
+        Ok(())
     }
 
     /// Stops the thread after its current job and remembers the pause.
     pub fn pause(&self) {
         self.inner.paused.store(true, Ordering::SeqCst);
         self.inner.wanted.store(false, Ordering::SeqCst);
+        self.inner.stop_watcher();
         self.inner.halt();
     }
 
@@ -421,6 +697,7 @@ impl Engine {
     /// Stops and joins the thread.
     pub fn shutdown(&self) {
         self.inner.wanted.store(false, Ordering::SeqCst);
+        self.inner.stop_watcher();
         self.inner.halt();
     }
 }
@@ -495,6 +772,16 @@ mod tests {
         e.counts().map(|c| c.vectors >= 3 && c.pending == 0).unwrap_or(false)
     }
 
+    fn indexed_files(e: &Engine, n: usize) -> bool {
+        e.counts().map(|c| c.vectors >= n && c.pending == 0).unwrap_or(false)
+    }
+
+    /// The three notes plus a Markdown file, so there is a second extension to filter on.
+    fn notes_and_md(dir: &Path) {
+        notes(dir);
+        std::fs::write(dir.join("d.md"), "# Herons\n\nA heron stood motionless in the reeds.").unwrap();
+    }
+
     #[test]
     fn engine_is_send_sync() {
         fn ok<T: Send + Sync>() {}
@@ -516,6 +803,72 @@ mod tests {
     }
 
     #[test]
+    fn extension_filter_returns_only_that_extension() {
+        let tmp = tempfile::tempdir().unwrap();
+        let docs = tmp.path().join("docs");
+        notes_and_md(&docs);
+        let e = engine(tmp.path());
+        let rx = e.subscribe();
+        e.add_folder(docs.clone()).unwrap();
+        e.start_indexing().unwrap();
+        wait_for("indexing", || indexed_files(&e, 4));
+        wait_for("idle", || e.status() == Status::Idle);
+        drop(rx);
+
+        let txt = e.search("ext:txt", 10, None).unwrap();
+        assert_eq!(txt.len(), 3, "{txt:?}");
+        assert!(txt.iter().all(|h| h.path.ends_with(".txt")), "{txt:?}");
+
+        let md = e.search("ext:md", 10, None).unwrap();
+        assert_eq!(md.len(), 1, "{md:?}");
+        assert!(md[0].path.ends_with("d.md"));
+
+        // Words and a filter together: the word still has to be in the file.
+        let both = e.search("heron ext:txt", 10, None).unwrap();
+        assert!(both.iter().all(|h| h.path.ends_with(".txt")), "{both:?}");
+    }
+
+    #[test]
+    fn size_filter_below_one_byte_returns_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let docs = tmp.path().join("docs");
+        notes_and_md(&docs);
+        let e = engine(tmp.path());
+        e.add_folder(docs.clone()).unwrap();
+        e.start_indexing().unwrap();
+        wait_for("indexing", || indexed_files(&e, 4));
+        wait_for("idle", || e.status() == Status::Idle);
+
+        assert!(e.search("size:<1b", 10, None).unwrap().is_empty());
+        assert!(e.search("walrus size:<1b", 10, None).unwrap().is_empty());
+        assert_eq!(e.search("size:>1b", 10, None).unwrap().len(), 4);
+    }
+
+    #[test]
+    fn limit_applies_after_filtering() {
+        let tmp = tempfile::tempdir().unwrap();
+        let docs = tmp.path().join("docs");
+        notes_and_md(&docs);
+        let e = engine(tmp.path());
+        e.add_folder(docs.clone()).unwrap();
+        e.start_indexing().unwrap();
+        wait_for("indexing", || indexed_files(&e, 4));
+        wait_for("idle", || e.status() == Status::Idle);
+
+        // The only Markdown file is not the first unfiltered hit for a word that appears in the notes,
+        // yet with a limit of 1 the filter still finds it.
+        let unfiltered = e.search("walrus", 1, None).unwrap();
+        assert!(unfiltered[0].path.ends_with("a.txt"), "{unfiltered:?}");
+        let md = e.search("ext:md", 1, None).unwrap();
+        assert_eq!(md.len(), 1);
+        assert!(md[0].path.ends_with("d.md"), "{md:?}");
+
+        let two = e.search("ext:txt", 2, None).unwrap();
+        assert_eq!(two.len(), 2, "{two:?}");
+        assert!(two.iter().all(|h| h.path.ends_with(".txt")));
+    }
+
+    #[test]
     fn indexes_and_searches() {
         let tmp = tempfile::tempdir().unwrap();
         let docs = tmp.path().join("docs");
@@ -534,6 +887,112 @@ mod tests {
         let events: Vec<EngineEvent> = rx.try_iter().collect();
         assert!(events.iter().any(|e| matches!(e, EngineEvent::Progress { .. })));
         assert!(events.contains(&EngineEvent::Idle));
+        e.shutdown();
+    }
+
+    #[test]
+    fn searcher_is_kept_between_queries_and_rebuilt_after_a_change() {
+        let tmp = tempfile::tempdir().unwrap();
+        let docs = tmp.path().join("docs");
+        notes(&docs);
+        let e = engine(tmp.path());
+        e.add_folder(docs.clone()).unwrap();
+        e.start_indexing().unwrap();
+        wait_for("indexing", || indexed(&e));
+        wait_for("idle", || e.status() == Status::Idle);
+        let loads = || e.inner.searcher_loads.load(Ordering::SeqCst);
+        e.search("walrus", 3, None).unwrap();
+        let first = loads();
+        assert_eq!(first, 1, "first query builds the searcher");
+        for q in ["ostrich", "zebra", "walrus"] {
+            e.search(q, 3, None).unwrap();
+        }
+        assert_eq!(loads(), first, "unchanged index: the cached searcher is reused");
+        std::fs::write(docs.join("d.txt"), "A pelican scooped fish from the harbour.").unwrap();
+        e.start_indexing().unwrap();
+        wait_for("new file", || e.search("pelican", 3, None).map(|h| h.first().is_some_and(|h| h.path.ends_with("d.txt"))).unwrap_or(false));
+        assert!(loads() > first, "a commit makes the next query rebuild the searcher");
+        e.shutdown();
+    }
+
+    #[test]
+    fn watcher_picks_up_a_new_file_without_a_manual_sync() {
+        let tmp = tempfile::tempdir().unwrap();
+        let docs = tmp.path().join("docs");
+        notes(&docs);
+        let e = engine(tmp.path());
+        e.set_watch(true, WatchPolicy::Live).unwrap(); // the default policy waits for AC power; a test box may not be
+        e.add_folder(docs.clone()).unwrap();
+        e.start_indexing().unwrap();
+        wait_for("indexing", || indexed(&e));
+        wait_for("watcher", || e.watch_info().running);
+        std::fs::write(docs.join("d.txt"), "A pelican scooped fish from the harbour.").unwrap();
+        wait_for("watcher sync", || {
+            e.search("pelican", 3, None).map(|h| h.first().is_some_and(|h| h.path.ends_with("d.txt"))).unwrap_or(false)
+        });
+        e.pause();
+        assert!(!e.watch_info().running, "pausing stops the watcher");
+        e.shutdown();
+    }
+
+    #[test]
+    fn watch_policy_names_round_trip_and_defaults_are_conservative() {
+        for p in [WatchPolicy::Live, WatchPolicy::PluggedIn, WatchPolicy::Manual] {
+            assert_eq!(WatchPolicy::parse(p.as_str()), Some(p));
+        }
+        assert_eq!(WatchPolicy::parse("sometimes"), None);
+        let tmp = tempfile::tempdir().unwrap();
+        let e = engine(tmp.path());
+        assert_eq!(e.watch_settings(), (true, WatchPolicy::PluggedIn), "watch on, battery-friendly by default");
+        assert!(!e.usage_tracking(), "open-history is off by default");
+        assert_eq!(e.watch_info(), WatchInfo::default(), "nothing runs before indexing is started");
+    }
+
+    #[test]
+    fn manual_policy_records_but_does_not_sync() {
+        let tmp = tempfile::tempdir().unwrap();
+        let docs = tmp.path().join("docs");
+        notes(&docs);
+        let e = engine(tmp.path());
+        e.set_watch(true, WatchPolicy::Manual).unwrap();
+        e.add_folder(docs.clone()).unwrap();
+        e.start_indexing().unwrap();
+        wait_for("indexing", || indexed(&e));
+        wait_for("watcher", || e.watch_info().running);
+        std::fs::write(docs.join("d.txt"), "A pelican scooped fish from the harbour.").unwrap();
+        wait_for("change recorded", || e.watch_info().pending > 0);
+        // The reason appears once the change has settled (the debounce), a moment after it is recorded.
+        wait_for("deferred reason", || e.watch_info().deferred.is_some_and(|d| d.contains("manual")));
+        std::thread::sleep(Duration::from_millis(1500));
+        assert!(e.search("pelican", 3, None).unwrap().iter().all(|h| !h.path.ends_with("d.txt")), "nothing syncs on its own");
+        e.shutdown();
+    }
+
+    #[test]
+    fn open_history_is_off_by_default_and_boosts_when_on() {
+        let tmp = tempfile::tempdir().unwrap();
+        let docs = tmp.path().join("docs");
+        std::fs::create_dir_all(&docs).unwrap();
+        std::fs::write(docs.join("a.txt"), "Harbour boats and fishing nets.").unwrap();
+        std::fs::write(docs.join("b.txt"), "Harbour boats and fishing nets.").unwrap(); // same words, tie on meaning
+        let e = engine(tmp.path());
+        e.add_folder(docs.clone()).unwrap();
+        e.start_indexing().unwrap();
+        wait_for("indexing", || e.counts().map(|c| c.vectors >= 2 && c.pending == 0).unwrap_or(false));
+        let b = docs.join("b.txt").to_string_lossy().into_owned();
+        e.record_open(&b).unwrap(); // tracking is off: ignored
+        assert!(!tmp.path().join("index/usage.sqlite").exists(), "no history file while tracking is off");
+        let plain: Vec<String> = e.search("harbour boats", 5, None).unwrap().into_iter().map(|h| h.path).collect();
+        e.set_usage_tracking(true).unwrap();
+        for _ in 0..3 {
+            e.record_open(&b).unwrap();
+        }
+        let boosted = e.search("harbour boats", 5, None).unwrap();
+        assert_eq!(boosted[0].path, b, "the opened file ranks first");
+        assert_eq!(boosted.len(), plain.len());
+        e.set_usage_tracking(false).unwrap();
+        let after: Vec<String> = e.search("harbour boats", 5, None).unwrap().into_iter().map(|h| h.path).collect();
+        assert_eq!(after, plain, "turning it off restores the plain order and drops the history");
         e.shutdown();
     }
 

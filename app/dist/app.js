@@ -6,7 +6,7 @@
   const isMac = /Mac/.test(navigator.platform);
   let hits = [], sel = -1, timer = null, seq = 0, modelPresent = true, downloading = false;
   let status = { state: "idle" }, vectors = 0;
-  let folderCount = null, countsData = null, suggestions = [];
+  let folderCount = null, countsData = null, suggestions = [], liveData = null;
 
   function esc(s) {
     return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
@@ -186,9 +186,62 @@
     $("indexCounts").innerHTML = countsHtml();
   }
 
+  // Live updates: the pill in the header, the banner when changes are waiting, and the settings in the panel.
+  function renderLive() {
+    const l = liveData, pill = $("livePill"), banner = $("liveBanner");
+    if (!l || !modelPresent || !folderCount) { pill.hidden = true; banner.hidden = true; return; }
+    const n = l.pending;
+    let tone, text;
+    if (!l.watchEnabled) { tone = "off"; text = "Live updates off"; }
+    else if (n > 0 && l.deferred) { tone = "wait"; text = `${n} change${n === 1 ? "" : "s"} waiting`; }
+    else if (status.state === "indexing") { tone = "busy"; text = "Updating…"; }
+    else if (!l.running) { tone = "off"; text = "Not watching"; }
+    else { tone = "ok"; text = "Up to date"; }
+    pill.hidden = false;
+    pill.dataset.tone = tone;
+    pill.textContent = (tone === "ok" ? "● " : tone === "wait" ? "⏸ " : tone === "busy" ? "⟳ " : "○ ") + text;
+    pill.title = l.watchEnabled ? `Live updates: ${l.mode || "starting"}` : "Live updates are off. Click to change.";
+    banner.hidden = !(n > 0 && l.deferred);
+    if (!banner.hidden) $("liveBannerText").textContent =
+      `${n} file change${n === 1 ? " is" : "s are"} waiting: ${l.deferred}. Searches still work; new and edited files appear after a sync.`;
+    if (document.activeElement !== $("watchPolicy")) $("watchPolicy").value = l.policy;
+    $("watchOn").checked = l.watchEnabled;
+    $("watchPolicy").disabled = !l.watchEnabled;
+    $("usageOn").checked = l.usageTracking;
+    $("clearUsage").hidden = !l.usageTracking;
+  }
+  async function refreshLive() {
+    try { liveData = await invoke("live"); } catch (e) { liveData = null; }
+    renderLive();
+  }
+  $("livePill").addEventListener("click", () => { const p = $("folders"); p.hidden = false; loadFolders(); p.scrollIntoView({ block: "nearest" }); });
+  $("syncNow").addEventListener("click", async () => {
+    $("syncNow").disabled = true;
+    try { await invoke("start_indexing"); } catch (e) { alert(e); }
+    $("syncNow").disabled = false;
+    refreshStatus();
+  });
+  async function saveWatch() {
+    try { liveData = await invoke("set_watch", { enabled: $("watchOn").checked, policy: $("watchPolicy").value }); } catch (e) { alert(e); }
+    renderLive();
+  }
+  $("watchOn").addEventListener("change", saveWatch);
+  $("watchPolicy").addEventListener("change", saveWatch);
+  $("usageOn").addEventListener("change", async () => {
+    const on = $("usageOn").checked;
+    if (!on && !confirm("Turn off and delete the history of files you opened?")) { $("usageOn").checked = true; return; }
+    try { liveData = await invoke("set_usage_tracking", { on }); } catch (e) { alert(e); }
+    renderLive();
+  });
+  $("clearUsage").addEventListener("click", async () => {
+    if (!confirm("Delete the history of files you opened?")) return;
+    try { await invoke("clear_usage"); } catch (e) { alert(e); }
+  });
+
   // Status bar
   function renderStatus() {
     renderControls();
+    renderLive();
     $("dl").hidden = modelPresent;
     $("dlBtn").hidden = downloading;
     if (!modelPresent) { if (!downloading) $("statusText").textContent = "No model"; return; }
@@ -207,6 +260,7 @@
       countsData = await invoke("counts");
       vectors = countsData.vectors;
       folderCount = (await invoke("folders")).length;
+      liveData = await invoke("live").catch(() => null);
     } catch (e) { $("statusText").textContent = String(e); return; }
     renderStatus();
   }

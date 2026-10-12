@@ -11,6 +11,22 @@ use digup_extract_text::docs::{self, DocError};
 use std::path::Path;
 
 /// Prepare one job. Per-file errors become `Leave`, never a panic.
+/// blake3 of a file's bytes as lowercase hex, read in 1 MiB chunks so large files never sit in memory.
+pub fn content_hash(path: &Path) -> std::io::Result<String> {
+    use std::io::Read;
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = blake3::Hasher::new();
+    let mut buf = vec![0u8; 1 << 20];
+    loop {
+        let n = file.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(hasher.finalize().to_hex().to_string())
+}
+
 pub fn prepare(job: &Job, opts: &IndexOptions, ocr: &dyn Ocr) -> Prepared {
     let path = Path::new(&job.file.path);
     let result = match job.file.kind {
@@ -21,7 +37,25 @@ pub fn prepare(job: &Job, opts: &IndexOptions, ocr: &dyn Ocr) -> Prepared {
         FileKind::Pdf => prepare_pdf(job, opts, path, ocr),
         FileKind::Video => prepare_video(opts, path),
     };
-    Prepared { job: job.clone(), result }
+    let mut job = job.clone();
+    // The hash was taken when the run was planned, possibly long before this read. If the file changed in between (or
+    // while it was read), the rows are built from other bytes than the hash names, so the hash must not be stored:
+    // a later byte-identical copy would otherwise be handed the wrong rows.
+    if job.content_hash.is_some() && !unchanged_since_crawl(path, &job.file) {
+        job.content_hash = None;
+    }
+    Prepared { job, result }
+}
+
+/// Whether `path` still has the size and modification time that the crawl recorded.
+fn unchanged_since_crawl(path: &Path, file: &digup_store::index::FileRecord) -> bool {
+    let Ok(meta) = std::fs::metadata(path) else { return false };
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(f64::NAN, |d| d.as_secs_f64());
+    meta.len() as i64 == file.size && (mtime - file.mtime).abs() <= 0.001
 }
 
 /// The thumbnail is decoded back to RGB8 and embedded (Swift embeds its scratch thumbnail file). Simplification:
@@ -210,6 +244,7 @@ mod tests {
 
     fn job(path: &Path, kind: FileKind, step: Option<std::ops::Range<usize>>) -> Job {
         Job {
+            content_hash: None,
             file: FileRecord {
                 id: 1,
                 path: path.to_string_lossy().into_owned(),
@@ -382,5 +417,25 @@ mod tests {
         assert!(matches!(prepare(&job(&wav, FileKind::Audio, None), &o, &NoOcr).result, Err(Leave::Failed(_))));
         assert!(matches!(prepare(&job(&missing, FileKind::Code, None), &o, &NoOcr).result, Err(Leave::Failed(_))));
         assert!(matches!(prepare(&job(&missing, FileKind::Pdf, None), &o, &NoOcr).result, Err(Leave::Failed(_))));
+    }
+
+    #[test]
+    fn content_hash_is_dropped_when_the_file_changed_since_the_crawl() {
+        let dir = tmp("stale-hash");
+        let path = dir.join("a.txt");
+        std::fs::write(&path, "The first version of the note.").unwrap();
+        let meta = std::fs::metadata(&path).unwrap();
+        let mtime = meta.modified().unwrap().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs_f64();
+        let mut j = job(&path, FileKind::Doc, None);
+        j.file.size = meta.len() as i64;
+        j.file.mtime = mtime;
+        j.content_hash = Some("abc".into());
+        let opts = IndexOptions::default();
+        assert_eq!(prepare(&j, &opts, &NoOcr).job.content_hash.as_deref(), Some("abc"), "unchanged: kept");
+        // Same length, different bytes, later mtime: the hash no longer names the bytes that get read.
+        std::fs::write(&path, "The other version of the note.").unwrap();
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(5);
+        std::fs::File::options().write(true).open(&path).unwrap().set_modified(later).unwrap();
+        assert_eq!(prepare(&j, &opts, &NoOcr).job.content_hash, None, "changed since the crawl: dropped");
     }
 }

@@ -9,8 +9,13 @@
 <body>
 <header>
   <input id="q" type="search" placeholder="Search your files…" autofocus autocomplete="off" spellcheck="false">
-  <button id="gear" title="Folders" aria-label="Folders">&#9881;</button>
+  <button id="livePill" class="pill" title="Live updates" aria-label="Live updates" hidden></button>
+  <button id="gear" title="Folders and settings" aria-label="Folders and settings">&#9881;</button>
 </header>
+<div id="liveBanner" role="status" hidden>
+  <span id="liveBannerText"></span>
+  <button id="syncNow">Sync now</button>
+</div>
 <nav id="kinds" class="chips" aria-label="Filter by kind">
   <button data-kind="" aria-pressed="true">All</button>
   <button data-kind="screenshot" aria-pressed="false">Screenshots</button>
@@ -21,6 +26,23 @@
   <button data-kind="video" aria-pressed="false">Video</button>
 </nav>
 <section id="folders" hidden>
+  <h2>Live updates</h2>
+  <div class="setting">
+    <label><input type="checkbox" id="watchOn"> Keep the index up to date as files change</label>
+    <label class="sub">When to update
+      <select id="watchPolicy">
+        <option value="plugged_in">Only when plugged in (saves battery)</option>
+        <option value="live">Always</option>
+        <option value="manual">Only when I press Sync now</option>
+      </select>
+    </label>
+    <p class="dim hint">Changes are always noticed; this only decides when the model runs. Searching is never delayed.</p>
+  </div>
+  <div class="setting">
+    <label><input type="checkbox" id="usageOn"> Rank files I open higher</label>
+    <p class="dim hint">Remembers which results you open, on this Mac only. Those files rank slightly higher and are indexed first. Turning it off deletes the history.</p>
+    <button id="clearUsage" hidden>Clear history</button>
+  </div>
   <h2>Indexed folders</h2>
   <ul id="folderList"></ul>
   <div id="indexCounts" class="dim"></div>

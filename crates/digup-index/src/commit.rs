@@ -86,9 +86,32 @@ pub fn commit(
             info,
         };
     }
+    // The content hash names the bytes this file's rows were built from; copies of a done file reuse it (see run.rs).
+    // Later steps of a long file carry the hash of the first step forward.
+    if matches!(outcome.state, FileState::Done | FileState::Partial) {
+        match &prepared.job.content_hash {
+            Some(hash) => {
+                outcome.info.insert(CONTENT_HASH.into(), hash.clone());
+                outcome.info.insert(CONTENT_SIZE.into(), prepared.job.file.size.to_string());
+            }
+            None if prepared.job.step.is_some() => {
+                let before = store.info(id)?;
+                for key in [CONTENT_HASH, CONTENT_SIZE] {
+                    if let Some(v) = before.get(key) {
+                        outcome.info.entry(key.into()).or_insert_with(|| v.clone());
+                    }
+                }
+            }
+            None => {}
+        }
+    }
     store.add_segments_and_finish(id, &outcome.segments, outcome.state, outcome.detail.as_deref(), &outcome.info)?;
     Ok(())
 }
+
+/// `files.info` keys written by commit and read by run's deduplication.
+pub const CONTENT_HASH: &str = "content_hash";
+pub const CONTENT_SIZE: &str = "content_size";
 
 fn build(embedder: &mut dyn Embed, payload: Payload, opts: &IndexOptions) -> Result<Outcome> {
     match payload {
@@ -410,7 +433,7 @@ mod tests {
     }
 
     fn prepared(rec: &FileRecord, result: Result<Payload, Leave>) -> Prepared {
-        Prepared { job: Job { file: rec.clone(), step: None }, result }
+        Prepared { job: Job { file: rec.clone(), step: None, content_hash: None }, result }
     }
 
     /// (kind, modality, loc, loc_end, has_vec, has_fts) of every non-name segment.

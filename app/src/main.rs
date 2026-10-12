@@ -4,7 +4,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use digup_engine::{Engine, EngineConfig, EngineEvent, Hit, IndexCounts, Status};
+use digup_engine::{Engine, EngineConfig, EngineEvent, Hit, IndexCounts, Status, WatchPolicy};
 use serde::Serialize;
 use tauri::menu::{Menu, PredefinedMenuItem, Submenu};
 use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
@@ -87,6 +87,36 @@ fn counts_dto(c: IndexCounts) -> CountsDto {
     CountsDto { files_by_kind_state: c.files_by_kind_state, vectors: c.vectors, pending: c.pending, unfinished: c.unfinished }
 }
 
+/// Live-update state for the status pill and the settings panel.
+#[derive(Serialize, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+struct LiveDto {
+    watch_enabled: bool,
+    /// `live`, `plugged_in` or `manual`.
+    policy: &'static str,
+    running: bool,
+    mode: String,
+    /// Changes recorded and waiting for conditions to allow a sync.
+    pending: usize,
+    /// Why they are waiting (on battery, manual policy, ...).
+    deferred: Option<String>,
+    usage_tracking: bool,
+}
+
+fn live_dto(engine: &Engine) -> LiveDto {
+    let (watch_enabled, policy) = engine.watch_settings();
+    let info = engine.watch_info();
+    LiveDto {
+        watch_enabled,
+        policy: policy.as_str(),
+        running: info.running,
+        mode: info.mode,
+        pending: info.pending,
+        deferred: info.deferred,
+        usage_tracking: engine.usage_tracking(),
+    }
+}
+
 fn event_json(ev: EngineEvent) -> serde_json::Value {
     use serde_json::json;
     match ev {
@@ -126,6 +156,33 @@ async fn search(engine: Eng<'_>, query: String, limit: Option<usize>, kinds: Opt
 #[tauri::command]
 async fn status(engine: Eng<'_>) -> Res<StatusDto> {
     Ok(status_dto(engine.status()))
+}
+
+#[tauri::command]
+async fn live(engine: Eng<'_>) -> Res<LiveDto> {
+    Ok(live_dto(&engine))
+}
+
+#[tauri::command]
+async fn set_watch(engine: Eng<'_>, enabled: bool, policy: String) -> Res<LiveDto> {
+    let policy = WatchPolicy::parse(&policy).ok_or_else(|| format!("unknown policy {policy}"))?;
+    let engine = Arc::clone(engine.inner());
+    // Restarting the watcher joins its thread: keep it off the main thread.
+    tauri::async_runtime::spawn_blocking(move || engine.set_watch(enabled, policy).map(|()| live_dto(&engine)))
+        .await
+        .map_err(err)?
+        .map_err(err)
+}
+
+#[tauri::command]
+async fn set_usage_tracking(engine: Eng<'_>, on: bool) -> Res<LiveDto> {
+    engine.set_usage_tracking(on).map_err(err)?;
+    Ok(live_dto(&engine))
+}
+
+#[tauri::command]
+async fn clear_usage(engine: Eng<'_>) -> Res<()> {
+    engine.clear_usage().map_err(err)
 }
 
 #[tauri::command]
@@ -404,7 +461,7 @@ fn main() {
             }
         })
         .invoke_handler(tauri::generate_handler![
-            search, status, counts, folders, add_folder, remove_folder, suggested_folders, pick_folder, start_indexing,
+            search, status, counts, live, set_watch, set_usage_tracking, clear_usage, folders, add_folder, remove_folder, suggested_folders, pick_folder, start_indexing,
             pause, resume, model_present, download_models, open_hit, reveal_path, quit, thumbnail
         ])
         .build(tauri::generate_context!())

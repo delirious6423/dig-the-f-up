@@ -1,6 +1,8 @@
 //! Port of Swift `IndexOptions` (docs/spec-pipeline.md section 3.1).
 
+use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 #[derive(Debug, Clone)]
 pub struct IndexOptions {
@@ -26,6 +28,15 @@ pub struct IndexOptions {
     pub excluded_folders: Vec<PathBuf>,
     /// New files indexed at once regardless of power state (Swift: 50).
     pub new_files_limit: usize,
+    /// Skip embedding a file whose bytes equal an already indexed file of the same kind (copies its rows instead).
+    /// Not part of the fingerprint: vectors are identical either way.
+    pub dedup_by_content: bool,
+    /// Files above this size are never hashed for deduplication.
+    pub dedup_max_bytes: u64,
+    /// Frecency score per path (files the user opens often). Pending files with a score are indexed before the rest
+    /// of their kind, highest first; the kind order and newest-first order are otherwise unchanged. `None` keeps the
+    /// Swift order exactly. Not part of the fingerprint: it only changes the order of work.
+    pub priority: Option<Arc<HashMap<String, f64>>>,
 }
 
 impl Default for IndexOptions {
@@ -52,6 +63,9 @@ impl Default for IndexOptions {
             include_datasets: false,
             excluded_folders: Vec::new(),
             new_files_limit: 50,
+            dedup_by_content: true,
+            dedup_max_bytes: 512 << 20,
+            priority: None,
         }
     }
 }

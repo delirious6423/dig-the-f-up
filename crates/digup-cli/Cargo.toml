@@ -14,6 +14,8 @@ anyhow = { workspace = true }
 digup-core = { workspace = true }
 digup-crawl = { path = "../digup-crawl" }
 digup-embed = { path = "../digup-embed" }
+digup-engine = { path = "../digup-engine" }
+digup-mcp = { path = "../digup-mcp" }
 digup-extract-pdf = { path = "../digup-extract-pdf" }
 digup-extract-video = { path = "../digup-extract-video" }
 digup-models = { path = "../digup-models" }

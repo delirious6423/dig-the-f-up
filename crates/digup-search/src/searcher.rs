@@ -11,6 +11,7 @@ use digup_store::{ScanMode, VectorIndex};
 use rusqlite::{Connection, OptionalExtension};
 use unicode_segmentation::UnicodeSegmentation;
 
+use crate::filters::Filters;
 use crate::{code_lookup, text};
 
 /// Scale rows that don't set the scale (Model.swift: `bigPDFPages`, `pdfStep`, `docStep`): the later pages of a long
@@ -46,11 +47,14 @@ pub struct SearchOptions {
     pub word_weight: Option<f64>,
     /// Whether the last word is a prefix ("being typed").
     pub prefix_last: bool,
+    /// Query-time filters (`ext:`, `size:`, `mtime:`). They only restrict which candidates may be returned; the
+    /// scores of the rest are the same as without them.
+    pub filters: Filters,
 }
 
 impl Default for SearchOptions {
     fn default() -> Self {
-        Self { kinds: None, limit: 20, z_gate: 2.0, word_weight: None, prefix_last: false }
+        Self { kinds: None, limit: 20, z_gate: 2.0, word_weight: None, prefix_last: false, filters: Filters::default() }
     }
 }
 
@@ -80,9 +84,48 @@ pub struct SearchHit {
     pub focus: Option<f64>,
 }
 
+/// The searcher's connection: borrowed for a one-shot search, owned when the searcher is cached across queries
+/// (an owned handle makes it `'static`, so the engine can keep it).
+fn data_version(conn: &Connection) -> Result<i64> {
+    Ok(conn.query_row("PRAGMA data_version", [], |r| r.get(0))?)
+}
+
+enum ConnHandle<'a> {
+    Borrowed(&'a Connection),
+    Owned(Connection),
+}
+
+impl std::ops::Deref for ConnHandle<'_> {
+    type Target = Connection;
+    fn deref(&self) -> &Connection {
+        match self {
+            ConnHandle::Borrowed(c) => c,
+            ConnHandle::Owned(c) => c,
+        }
+    }
+}
+
+/// A `Searcher` that owns its connection, so it can be kept between queries and moved across threads.
+///
+/// `Searcher` itself is not `Send`: its borrowed-connection arm holds a `&Connection`, and `Connection` is not
+/// `Sync`. This wrapper can only be made by `Searcher::with_owned_connection`, which builds the owned arm, so the
+/// borrowed arm never exists inside it.
+pub struct OwnedSearcher(Searcher<'static>);
+
+// SAFETY: the only field is a `Searcher<'static>` built with `ConnHandle::Owned` (the constructor is the only way in
+// and the field is private). An owned `rusqlite::Connection` is `Send`, and every other field is plain owned data.
+unsafe impl Send for OwnedSearcher {}
+
+impl std::ops::Deref for OwnedSearcher {
+    type Target = Searcher<'static>;
+    fn deref(&self) -> &Searcher<'static> {
+        &self.0
+    }
+}
+
 /// Hybrid searcher over one index connection. Vectors and file kinds are loaded once in `new`.
 pub struct Searcher<'a> {
-    conn: &'a Connection,
+    conn: ConnHandle<'a>,
     /// This is the code index's searcher (`IndexStore::CODE_FILE`): names are looked up as names (`code_lookup`).
     is_code: bool,
     /// One row per vector: `vectors.ids` holds the segment id.
@@ -98,6 +141,8 @@ pub struct Searcher<'a> {
     /// Runs the keyword stage with the original SQL (`keyword_stage_legacy`). For the equivalence test and for
     /// checking the fast path; off in normal use.
     legacy_keyword: bool,
+    /// `PRAGMA data_version` read just before the vectors were loaded (see `is_current`).
+    loaded_version: i64,
 }
 
 /// A keyword match: the file's first FTS row in bm25 order.
@@ -133,6 +178,26 @@ impl<'a> Searcher<'a> {
 
     /// `new` for the main index (`is_code` false) or the code index (true).
     pub fn with_code(conn: &'a Connection, is_code: bool) -> Result<Self> {
+        Self::build(ConnHandle::Borrowed(conn), is_code)
+    }
+
+    /// Like `with_code` but takes the connection, so the searcher can outlive the caller's store and be kept between
+    /// queries. Loading the vectors is the expensive part (about 0.09 s at 100k segments, 8-10 s at 1M; docs/BENCHMARKS.md),
+    /// so a long-lived caller pays it once and checks `data_version` to learn when the index changed.
+    pub fn with_owned_connection(conn: Connection, is_code: bool) -> Result<OwnedSearcher> {
+        Ok(OwnedSearcher(Searcher::build(ConnHandle::Owned(conn), is_code)?))
+    }
+
+    /// Whether the index is unchanged since this searcher loaded it. SQLite's `data_version` moves whenever another
+    /// connection commits, so a cached searcher checks this before each query and is rebuilt when it is false. The
+    /// version is read before the load, so a commit that lands mid-load makes the next check false rather than being
+    /// missed.
+    pub fn is_current(&self) -> Result<bool> {
+        Ok(data_version(&self.conn)? == self.loaded_version)
+    }
+
+    fn build(conn: ConnHandle<'a>, is_code: bool) -> Result<Self> {
+        let loaded_version = data_version(&conn)?;
         let mut file_kind = HashMap::new();
         {
             let mut st = conn.prepare("SELECT id, kind FROM files")?;
@@ -199,6 +264,7 @@ impl<'a> Searcher<'a> {
             slot_of,
             file_kind,
             legacy_keyword: false,
+            loaded_version,
         })
     }
 
@@ -279,6 +345,10 @@ impl<'a> Searcher<'a> {
             if share >= 0.5 {
                 candidates.insert(file);
             }
+        }
+        // Filters restrict the candidates before scoring and the limit; the scale above is over the whole index.
+        if !opts.filters.is_empty() {
+            self.retain_matching(&mut candidates, &opts.filters)?;
         }
         let mut scored: Vec<(i64, f64)> = candidates
             .into_iter()
@@ -516,7 +586,7 @@ impl<'a> Searcher<'a> {
                     continue;
                 };
                 let file: i64 = r.get(0)?;
-                if !self.allowed_file(file, opts) || !seen.insert(file) {
+                if !self.allowed_file(file, opts) || !self.passes_filters(file, &opts.filters)? || !seen.insert(file) {
                     continue;
                 }
                 let fts_snippet: Option<String> = r.get(1)?;
@@ -572,7 +642,7 @@ impl<'a> Searcher<'a> {
         let mut rows = st.query([patterns.join(" OR ")])?;
         while let Some(r) = rows.next()? {
             let file: i64 = r.get(0)?;
-            if words.len() >= MAX_WORD_FILES || !self.allowed_file(file, opts) || !seen.insert(file) {
+            if words.len() >= MAX_WORD_FILES || !self.allowed_file(file, opts) || !self.passes_filters(file, &opts.filters)? || !seen.insert(file) {
                 continue;
             }
             let segment: i64 = r.get(1)?;
@@ -598,6 +668,39 @@ impl<'a> Searcher<'a> {
             }
         }
         Ok((words, coverage))
+    }
+
+    /// Drops the candidates that the filters rule out. Path, size and mtime come from one lookup per 500 files.
+    fn retain_matching(&self, candidates: &mut HashSet<i64>, filters: &Filters) -> Result<()> {
+        let ids: Vec<i64> = candidates.iter().copied().collect();
+        let mut keep = HashSet::with_capacity(ids.len());
+        for chunk in ids.chunks(500) {
+            let marks = vec!["?"; chunk.len()].join(",");
+            let mut st = self.conn.prepare(&format!("SELECT id, path, size, mtime FROM files WHERE id IN ({marks})"))?;
+            let mut rows = st.query(rusqlite::params_from_iter(chunk.iter()))?;
+            while let Some(r) = rows.next()? {
+                let (id, path, size, mtime): (i64, String, i64, f64) = (r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?);
+                if filters.matches(&path, size, mtime) {
+                    keep.insert(id);
+                }
+            }
+        }
+        candidates.retain(|file| keep.contains(file));
+        Ok(())
+    }
+
+    /// Whether one file passes the filters. The keyword stage calls this before its caps (`MAX_WORD_FILES`,
+    /// `MAX_FTS_ROWS`), so a filtered query's keyword matches are chosen among files that pass: otherwise `report ext:pdf`
+    /// would lose a pdf ranked below the first hundred files for "report".
+    fn passes_filters(&self, file: i64, filters: &Filters) -> Result<bool> {
+        if filters.is_empty() {
+            return Ok(true);
+        }
+        let mut st = self.conn.prepare_cached("SELECT path, size, mtime FROM files WHERE id = ?1")?;
+        let row = st
+            .query_row([file], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, f64>(2)?)))
+            .optional()?;
+        Ok(row.is_some_and(|(path, size, mtime)| filters.matches(&path, size, mtime)))
     }
 
     fn allowed_file(&self, file: i64, opts: &SearchOptions) -> bool {
@@ -842,7 +945,7 @@ mod tests {
 
     fn bare(conn: &Connection, modality: Vec<u8>, sets: Vec<bool>) -> Searcher<'_> {
         Searcher {
-            conn,
+            conn: ConnHandle::Borrowed(conn),
             is_code: false,
             vectors: VectorIndex::default(),
             row_slot: vec![0; modality.len()],
@@ -853,6 +956,7 @@ mod tests {
             slot_of: HashMap::new(),
             file_kind: HashMap::new(),
             legacy_keyword: false,
+            loaded_version: 0,
         }
     }
 
@@ -991,5 +1095,93 @@ mod tests {
         assert!(!hits.is_empty());
         assert_eq!(hits[0].file_id, 2);
         assert!(hits[0].cosine.unwrap() > 0.99);
+    }
+
+    fn insert_file_at(conn: &Connection, id: i64, path: &str, size: i64, mtime: f64) {
+        conn.execute(
+            "INSERT INTO files(id, path, kind, size, mtime, inode, device) VALUES (?1, ?2, 'doc', ?3, ?4, ?1, 1)",
+            rusqlite::params![id, path, size, mtime],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn filters_apply_before_the_limit_and_keep_scores() {
+        let conn = digup_store::open_in_memory().unwrap();
+        // File i (id i + 1) lies a little further from the query than file i - 1, so the unfiltered order is by id.
+        for i in 0..12i64 {
+            let ext = if i % 2 == 0 { "pdf" } else { "txt" };
+            insert_file_at(&conn, i + 1, &format!("/docs/f{i}.{ext}"), i * 1000, 1000.0 + i as f64 * 100.0);
+            let theta = 0.1 * i as f32 + 0.05;
+            let mut v = vec![0f32; DIM];
+            v[0] = theta.cos();
+            v[1] = theta.sin();
+            insert_segment(&conn, i + 1, i + 1, "chunk", "text", &v, "");
+        }
+        let searcher = Searcher::new(&conn).unwrap();
+        let mut e0 = vec![0f32; DIM];
+        e0[0] = 1.0;
+        // Every file is a candidate, so the filters are the only thing that can remove one.
+        let base = SearchOptions { z_gate: -10.0, ..SearchOptions::default() };
+        let all = searcher.search(&e0, "", &SearchOptions { limit: 100, ..base.clone() }).unwrap();
+        let ids = |hits: &[SearchHit]| hits.iter().map(|h| h.file_id).collect::<Vec<i64>>();
+        assert_eq!(ids(&all), (1..=12).collect::<Vec<i64>>());
+        let run = |filters: Filters, limit: usize| {
+            searcher.search(&e0, "", &SearchOptions { limit, filters, ..base.clone() }).unwrap()
+        };
+
+        // Size >= 6000 bytes is files 7..=12, none of which is in the unfiltered top 3. The limit applies afterwards.
+        let big = Filters { size_min: Some(6000), ..Filters::default() };
+        let hits = run(big.clone(), 3);
+        assert_eq!(ids(&hits), vec![7, 8, 9]);
+        // Scores and z of the survivors are the ones they have without the filter.
+        for h in &hits {
+            let same = all.iter().find(|a| a.file_id == h.file_id).unwrap();
+            assert_eq!(h.score, same.score);
+            assert_eq!(h.z, same.z);
+            assert_eq!(h.cosine, same.cosine);
+        }
+
+        // The full filtered list is the unfiltered list with the non-matching files removed, in the same order.
+        let pdf_big = Filters { exts: Some(["pdf".to_string()].into_iter().collect()), ..big.clone() };
+        let filtered = run(pdf_big.clone(), 100);
+        let expected: Vec<&SearchHit> = all.iter().filter(|h| [7, 9, 11].contains(&h.file_id)).collect();
+        assert_eq!(filtered.len(), expected.len());
+        for (got, want) in filtered.iter().zip(expected) {
+            assert_eq!((got.file_id, got.score), (want.file_id, want.score));
+        }
+        assert_eq!(ids(&run(pdf_big, 2)), vec![7, 9]);
+
+        // Extension alone: the odd files (ids 2, 4, 6, ...) with a limit of 3.
+        let txt = Filters { exts: Some(["txt".to_string()].into_iter().collect()), ..Filters::default() };
+        assert_eq!(ids(&run(txt, 3)), vec![2, 4, 6]);
+
+        // Modification time: files 9..=12 are the newest.
+        let recent = Filters { mtime_min: Some(1800.0), ..Filters::default() };
+        assert_eq!(ids(&run(recent, 2)), vec![9, 10]);
+
+        // Nothing matches.
+        let none = Filters { size_min: Some(1_000_000), ..Filters::default() };
+        assert!(run(none, 5).is_empty());
+    }
+
+    #[test]
+    fn keyword_matches_are_filtered_before_the_candidate_cap() {
+        let conn = digup_store::open_in_memory().unwrap();
+        let mut v = vec![0f32; DIM];
+        v[5] = 1.0;
+        // 150 text files match "report" equally well; the only pdf has the highest ids, so without filtering it falls
+        // outside the first MAX_WORD_FILES keyword candidates.
+        for id in 1..=150i64 {
+            insert_file_at(&conn, id, &format!("/docs/r{id}.txt"), 10, 1000.0);
+            insert_segment(&conn, id, id, "chunk", "text", &v, "report");
+        }
+        insert_file_at(&conn, 151, "/docs/annual.pdf", 10, 1000.0);
+        insert_segment(&conn, 151, 151, "chunk", "text", &v, "report");
+        let searcher = Searcher::new(&conn).unwrap();
+        let filters = Filters { exts: Some(["pdf".to_string()].into_iter().collect()), ..Filters::default() };
+        let opts = SearchOptions { limit: 5, filters, ..SearchOptions::default() };
+        let hits = searcher.search(&[], "report", &opts).unwrap();
+        assert_eq!(hits.iter().map(|h| h.file_id).collect::<Vec<_>>(), vec![151]);
     }
 }
