@@ -1,4 +1,4 @@
-# DigUp desktop app (Tauri 2)
+# Dig-the-f-up desktop app (Tauri 2)
 
 A minimal desktop shell over `dtfu-engine`. It is a separate cargo project (own `[workspace]`), so
 `cargo test --workspace` at the repo root does not build it.
@@ -25,19 +25,20 @@ download resumes from them. Errors appear in a dismissible banner above the resu
 
 ## Data
 
-One folder, `~/Library/Application Support/DigUp/` (`dirs::data_dir()/DigUp`):
+One folder, `~/Library/Application Support/Dig-the-f-up/` (`dirs::data_dir()/Dig-the-f-up`):
 
 | Path | What it is |
 | --- | --- |
 | `index/` | the search index (SQLite) |
 | `settings.json` | your indexed-folder list and options |
 | `Models/` | the two model files (`embeddinggemma-2-Q8_0.gguf`, `mmproj-embeddinggemma-2-Q8_0.gguf`) |
-| `logs/dtfu.log` | the local log (see Logs); `dtfu.log.1` holds the previous 1 MiB. Lives in whichever of `DigUp/` or `DigUp-rs/` is in use (see below) |
+| `logs/dtfu.log` | the local log (see Logs); `dtfu.log.1` holds the previous 1 MiB. Lives in whichever of `Dig-the-f-up/`, `DigUp/` or `DigUp-rs/` is in use (see below) |
 
-Earlier builds used `~/Library/Application Support/DigUp-rs/` for the index and settings. Nothing is moved: if
-`DigUp/` has no index or settings yet and `DigUp-rs/` has them, the app keeps using `DigUp-rs/` in place. Models
-downloaded into `DigUp/Models/` are always found. The Hugging Face cache is only read (when the model is found there),
-never written or removed by DigUp.
+Earlier builds used `~/Library/Application Support/DigUp/` or `DigUp-rs/` for the index and settings. Nothing is
+moved: if `Dig-the-f-up/` has no index or settings yet and `DigUp/` (then `DigUp-rs/`) has them, the app keeps using
+that folder in place, read-only fallback for the lookup. Models in the original Swift app's
+`~/Library/Application Support/DigUp/Models` are shared and found if present. The Hugging Face cache is only read
+(when the model is found there), never written or removed by Dig-the-f-up.
 
 ## Logs
 
@@ -48,10 +49,12 @@ only if you choose to.
 
 ## Uninstall
 
-1. Quit DigUp (Cmd+Q) and delete `DigUp.app` from Applications.
-2. To remove your index, settings, logs and models, delete `~/Library/Application Support/DigUp/`.
-3. For installs from earlier builds, also delete `~/Library/Application Support/DigUp-rs/` if it exists.
-4. If you set `DTFU_MODELS`, the models live there instead; delete that folder too. The `digup` CLI uses the same
+1. Quit Dig-the-f-up (Cmd+Q) and delete `Dig-the-f-up.app` from Applications.
+2. To remove your index, settings, logs and models, delete `~/Library/Application Support/Dig-the-f-up/`.
+3. For installs from earlier builds, also delete `~/Library/Application Support/DigUp-rs/` if it exists. Do not
+   delete `~/Library/Application Support/DigUp/` if you also use the original Swift DigUp app (it may hold the shared
+   models); otherwise it can go too.
+4. If you set `DTFU_MODELS`, the models live there instead; delete that folder too. The `dtfu` CLI (default index `~/.dtfu`, falling back to `~/.digup`) uses the same
    `Models/` rule as the app. Nothing else is written outside these folders.
 
 ## Use
@@ -65,7 +68,7 @@ only if you choose to.
     cargo install tauri-cli --version '^2' --locked
     cd app && cargo tauri build --bundles app
 
-Output: `app/target/release/bundle/macos/DigUp.app` (36 MiB, arm64, links only system libraries; llama.cpp and Metal
+Output: `app/target/release/bundle/macos/Dig-the-f-up.app` (36 MiB, arm64, links only system libraries; llama.cpp and Metal
 are static). Measured 2026-10-12: it is ad-hoc signed only. Developer ID signing and notarization need the owner's Apple
 Developer account and are not done.
 

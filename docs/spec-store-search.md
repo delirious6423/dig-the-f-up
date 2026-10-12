@@ -1,6 +1,6 @@
 # DigUp storage and search: Rust porting spec
 
-Source: /root/dtfu-src (NOT /home/claude/dtfu-src; that path does not exist). All paths below are relative to it.
+Source: /root/digup-src (NOT /home/claude/digup-src; that path does not exist). All paths below are relative to it.
 Abbreviations: DB = Sources/DigUpKit/Database.swift, IS = IndexStore.swift, V = Vectors.swift, S = Searcher.swift,
 ST = SearchText.swift, CE = CodeExtractor.swift, M = Model.swift, R = Rules.swift, CR = Crawler.swift,
 IX = Indexer.swift, MAIN = Sources/digup/main.swift.

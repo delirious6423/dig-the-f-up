@@ -95,7 +95,7 @@ any report; don't oversell "Rust is faster".
   `DigUp.app/Contents/Helpers/digup` (UNVERIFIED that it runs standalone; the app invokes it, Engine.swift:921). It
   looks for models in `~/Library/Application Support/DigUp/Models` (ModelFiles.swift), so copy/link the two GGUFs there.
   `digup --help` lists estimate / index / search / status / eval.
-- Or build from source (needs Xcode 26 + CMake): see `reference/digup-swift/README.md` "Build from source".
+- Or build from source (needs Xcode 26 + CMake): see `reference/digup-swift/README.md` (fetched, not vendored: run `scripts/fetch-reference.sh`, commit 6faa29e) "Build from source".
 - Corpus: `reference/digup-swift/scripts/make-testbed.sh` builds a test folder (needs ffmpeg); `evals/*.json` (126
   queries; English/Bengali/Arabic/code) point at `~/DigUpTestbed`.
 - Record: first-pass index wall time per modality, CPU/GPU utilisation, peak RSS, cold and warm query latency, and
@@ -103,40 +103,36 @@ any report; don't oversell "Rust is faster".
 
 ---------------------------------------------------------------------------------------------------
 
-## 4. Current state (updated 2026-10-11, end of the first autonomous session)
+## 4. Current state (2026-10-12)
 
-Everything below runs on Apple Silicon macOS with Metal. 200 tests pass (`cargo test --workspace --release`, parity
-test included); `cargo clippy --workspace --all-targets --release` is clean. The work is NOT committed beyond commit 3c51112.
+Apple Silicon macOS with Metal is the verified platform. `cargo test --workspace --release` = 334 passed, 0 failed
+(plus the app crate: 19 passed); `cargo clippy -D warnings` is clean; the Metal parity test passes (all cosines
+>= 0.999999). History is committed. CI (GitHub Actions: macos-14, ubuntu, windows allow-fail) passed on macOS and
+Ubuntu on its first two runs; Windows builds after an advapi32 fix, but the crawl path-test fixes after its failures
+are NOT re-verified on Windows.
 
-| Crate | Status | Notes |
-|---|---|---|
-| `dtfu-core`, `dtfu-text` | done | enums/consts/prompts; text normalization, tokenizer helpers (NFKC, Arabic folding, `is_word_char` keeps virama/combining marks) |
-| `dtfu-store` | done | `IndexStore` (schema v5, insert/requeue/move/delete/prune/adopt/finish, `add_segments_and_finish` single transaction), NEON/AVX2/AVX-512/lanes scan kernels (x86 kernels UNTESTED: no AVX2 under Rosetta) |
-| `dtfu-search` | done | `Searcher` (z-score fusion, FTS, code index with `CodeLookup`/focus); same top-10 order as Swift on all 126 eval queries |
-| `dtfu-crawl` | done | now reads the macOS `kMDItemIsScreenCapture` xattr |
-| `dtfu-extract-text/-image/-audio` | done | docs (RTF honours `\fcharset`/`\ansicpg`), code, images, audio. Gaps: legacy `.doc` unsupported; lossy audio untested |
-| `dtfu-extract-pdf` | macOS only | PDFKit via objc2, rotation handled; other OSes return Unsupported until pdfium is wired |
-| `dtfu-extract-video` | stopgap | shells out to ffmpeg/ffprobe, streams frames and dedups while reading; frame interval 3.0 s hardcoded in options |
-| `dtfu-ocr` | macOS only | Apple Vision via objc2; other OSes return None (Q4: `ocrs`/Windows.Media.Ocr still to do) |
-| `dtfu-embed`, `dtfu-llama-sys` | done | Metal parity 1.000; `examples/bench_embed` |
-| `dtfu-index` | done | `sync`, `prepare`, `commit`, `run` (rayon prepare + one embed thread), `service` (scheduler loop for the app) |
-| `dtfu-models` | done | locate + resumable verified download; `digup download` |
-| `dtfu-cli` | partly | `index`, `search` (`--json`, `code:`), `status`, `eval`, `estimate`, `download`. Missing: `index-service` front end (library exists), `worker` (not needed: the embedder runs in-process) |
+Crates (`ls crates`; one-line purposes are in `CLAUDE.md`): core, text, store, search, usage, crawl, extract-{text,image,
+audio,pdf,video}, ocr, llama-sys, embed, models, index, engine, watch, mcp, cli; desktop shell in `app/` (Tauri 2).
+Backends: pdfium (`DTFU_PDFIUM_DIR`) and `ocrs` OCR (`DTFU_OCR_MODELS`) are written but never run against the real
+libraries off-Mac; video uses ffmpeg/ffprobe (`ffmpeg.exe` lookup fixed); OpenMP is off on Windows.
 
-Evidence (details and commands in `docs/BENCHMARKS.md`): eval ALL R@1/R@5 equals the Swift app on synthetic 0.95/1.00,
-multilingual 0.92/0.98 and code 1.00/1.00; Chinese (simp+trad) 0.92/1.00; first index pass of the small testbed 25 s
-vs 38.8 s Swift; Metal is 3.4-6.3x faster than CPU-only on this M4.
+Independent review of 2026-10-12 (`docs/REVIEW-2026-10-12.md`): fixed are async app commands, Esc hide, Dock reopen,
+image/zip/text size caps, scalar-count term rules (Swift parity), fingerprint stored as "{vector_source} | {options}"
+with in-place upgrade, service auto-reindex on model/settings change, schema-creation race, long-file resume fallback
+`last_place`, unreadable roots keep rows, clippy `-D warnings` in CI, and the docs drift. Still open: tray icon;
+`open_hit` restricted to indexed paths; thumbnail concurrency/EXIF; per-row SIMD dispatch; x86 kernels never executed
+on real hardware; crawl opens FIFOs before lstat; empty-token batch fails the whole batch; UNC/exclude paths not
+unixified on Windows.
 
-**Update 2026-10-12:** E2 desktop shell exists in `app/` (Tauri 2, static front end): search, kind chips, thumbnails, first-run welcome panel, folder/pause controls, model download, open-at-PDF-page / QuickTime / IINA moment (compile- and unit-tested only), unsigned arm64 `.app` bundle builds (`app/README.md`). Search keyword stage is 54x faster at 1M segments with identical rankings (BENCHMARKS B3). Off-Mac backends written but never run against the real libraries: pdfium (`dtfu-extract-pdf/src/pdfium.rs`, set `DTFU_PDFIUM_DIR`, no cwd search) and `ocrs` OCR (`dtfu-ocr/src/ocrs_backend.rs`, set `DTFU_OCR_MODELS`; model URLs in its module doc); both compile-check for x86_64-linux. Still open: x86 scan kernels on real hardware (compile-checked for x86_64-linux only), Windows/Linux, signing/notarization, the GUI has not been exercised end to end with a model.
+Evidence (details and commands in `docs/BENCHMARKS.md`): eval R@1/R@5 equals the Swift app on synthetic 0.95/1.00,
+multilingual 0.92/0.98 and code 1.00/1.00; Chinese (simp+trad) 0.92/1.00. First index of the small testbed, like with
+like: Rust 25.1 s first pass + 6.3 s long-file backfill = 31.4 s vs Swift 38.8 s, about 1.24x (one run, small corpus;
+not "25 s vs 38.8 s"). Cold query is SLOWER than Swift: 0.60 s vs 0.45 s (BENCHMARKS D1). Metal is 3.4-6.3x faster
+than CPU-only on this M4. Search keyword stage is 54x faster at 1M segments with identical rankings (B3).
 
-**Next, in order:** (1) E2 desktop shell (Tauri 2, Q3 default) on top of `dtfu_index::service` and `dtfu-search`;
-(2) E3 Windows/Linux: pdfium (Q5), OCR backends (Q4), ffmpeg bundling, x86 scan kernels on real hardware, run the new
-`.github/workflows/ci.yml` (never run yet; Windows job is allowed to fail); (3) larger-corpus benchmarks (real photos/PDFs,
-100k+ vectors) and profiling with samply; (4) E4 packaging. Image/audio embedding is GPU-bound (about 0.22 s per 140-token
-image on Metal), so the remaining levers are in llama.cpp/mtmd batching, not in our code.
-
-**Needs the owner:** git remote / repo name and visibility (Q2); whether to commit the uncommitted work; LICENSE holder
-name (placeholder "dig-the-f-up contributors"); a Windows/Linux machine or CI to verify non-Mac builds.
+**Remaining:** Windows/Linux verification on real machines, x86 scan kernels on hardware, signing/notarization and
+packaging, larger-corpus benchmarks, tray icon and the open review items above. Image/audio embedding is GPU-bound
+(about 0.22 s per 140-token image on Metal), so remaining levers are in llama.cpp/mtmd batching.
 
 ---------------------------------------------------------------------------------------------------
 
@@ -201,7 +197,7 @@ dtfu-embed     (done) + an EmbedPool/worker wrapper so the app can run it in a c
 dtfu-index     pipeline orchestration: crawl -> prepare (rayon) -> embed (single GPU thread, batched) -> commit;
                 pause/resume, power policy, long-file stepping, backfill
 dtfu-search    (or inside store) z-score fusion, FTS query building, text normalization (NFKC, Arabic folding)
-dtfu-cli       `digup estimate|index|search|status|eval|worker|index-service` (mirror the Swift CLI; same JSON-lines
+dtfu-cli       `dtfu estimate|index|search|status|eval|worker|index-service` (mirror the Swift CLI; same JSON-lines
                 worker protocol so tools can be shared)
 dtfu-app       desktop shell (see Open Question Q3): tray, global hotkey, search panel, results, onboarding, settings
 ```
@@ -349,8 +345,8 @@ Before reporting any milestone:
   behind a trait, add Windows.Media.Ocr and macOS Vision backends, pick defaults by eval results.
 - **Q5. Distribution of pdfium/ffmpeg:** bundle vs require system install. *Recommended:* bundle pdfium; use a bundled
   ffmpeg binary (LGPL build) for video, with `symphonia` for audio-only.
-- **Q6. Naming/branding:** this is a port of DigUp; the owner hasn't chosen a name. *Recommended:* keep `dig-the-f-up` as the
-  working name and don't ship a rename without asking.
+- **Q6. Naming/branding:** DECIDED: the product is "Dig-the-f-up" (repo `dig-the-f-up`, CLI `dtfu`, crates `dtfu-*`, env `DTFU_*`,
+  data folder `Dig-the-f-up`), a port of DigUp by Abdur Rahim.
 
 ---------------------------------------------------------------------------------------------------
 
@@ -358,7 +354,7 @@ Before reporting any milestone:
 
 1. Read DigUp's README and `Package.swift` (GitHub blocks automated browsing of `Sources/`, so the source was cloned).
 2. Gave the speed-up thesis (section 3). The owner said "let's kick things off".
-3. Cloned DigUp to `/root/dtfu-src` (now `reference/digup-swift`). Three parallel read-only agents wrote the three
+3. Cloned DigUp to `/root/digup-src` (now fetched into `reference/digup-swift` by `scripts/fetch-reference.sh`). Three parallel read-only agents wrote the three
    specs in `docs/`. Findings that shaped the plan: `llama-cpp-2` too old (D2), serial prepare stage, per-file media
    embedding, WAV round-trip, double screenshot decode.
 4. Scaffolded the workspace; benchmarked the scan; built llama.cpp b11461 with the patch (CPU); wrote bindings and the

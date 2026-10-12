@@ -1,18 +1,72 @@
-This project is a Rust port of DigUp (https://github.com/ARahim3/DigUp),
-Copyright (c) ARahim3, released under the MIT License.
+Dig-the-f-up is a Rust port of DigUp (https://github.com/ARahim3/DigUp) by Abdur Rahim, released under the MIT
+License. Its MIT copyright and permission notice is reproduced in full below and must stay with any redistribution
+of this code.
 
-The on-disk index schema (version 5), search scoring, prompts and indexing
-constants are taken from that project's Swift sources so that indexes and
-search quality stay comparable. Keep DigUp's MIT copyright notice with any
-redistribution of this code.
+The on-disk index schema (version 5), search scoring, prompts and indexing constants are taken from that project's
+Swift sources so that indexes and search quality stay comparable.
 
-Also used: llama.cpp b11461 (MIT, compiled into the app), EmbeddingGemma 2 by Google DeepMind (Apache 2.0,
-downloaded at run time, not shipped in the app). Full component list and Rust crate licenses:
-docs/THIRD-PARTY.md and scripts/gen-third-party-licenses.sh.
+Other components: llama.cpp b11461 (MIT, compiled into the app; notice below). Full component list and Rust crate
+licenses: docs/THIRD-PARTY.md and scripts/gen-third-party-licenses.sh.
 
-Optional OCR engine (cargo feature `lighton` of digup-ocr): LightOnOCR-3-0.8B by LightOn
-(https://huggingface.co/lightonai/LightOnOCR-3-0.8B), Apache License 2.0. We use the community GGUF conversion
-by mradermacher (https://huggingface.co/mradermacher/LightOnOCR-3-0.8B-GGUF, pinned revision in
-crates/digup-models), whose GGUF metadata declares `general.license = apache-2.0`.
-TODO(before shipping): read the license text on both Hugging Face model cards (no network access was used to
-verify them) and ship the Apache-2.0 license text next to the model files if they are redistributed.
+Models (not shipped in the app, downloaded at run time from pinned Hugging Face revisions):
+
+- EmbeddingGemma 2 by Google DeepMind (https://huggingface.co/google/embeddinggemma-2), Apache License 2.0 per its
+  model card and the card of the GGUF conversion used (https://huggingface.co/ggml-org/embeddinggemma-2-GGUF,
+  pinned revision in crates/dtfu-models); checked 2026-10-12.
+- Optional OCR engine (cargo feature `lighton` of dtfu-ocr): LightOnOCR-3-0.8B by LightOn
+  (https://huggingface.co/lightonai/LightOnOCR-3-0.8B), via the community GGUF conversion by mradermacher
+  (https://huggingface.co/mradermacher/LightOnOCR-3-0.8B-GGUF, pinned revision in crates/dtfu-models), whose GGUF
+  metadata declares `general.license = apache-2.0`; both model cards say Apache License 2.0 (checked 2026-10-12). Ship
+  the licence text next to the model files if they are ever redistributed.
+
+==============================================================================
+DigUp (https://github.com/ARahim3/DigUp)
+==============================================================================
+
+MIT License
+
+Copyright (c) 2026 Abdur Rahim
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+==============================================================================
+llama.cpp (https://github.com/ggml-org/llama.cpp)
+==============================================================================
+
+MIT License
+
+Copyright (c) 2023-2026 The ggml authors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

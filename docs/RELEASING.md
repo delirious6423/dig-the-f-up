@@ -1,4 +1,4 @@
-# Releasing DigUp
+# Releasing Dig-the-f-up
 
 Status: the workflow exists and has **not been run on GitHub** yet. Nothing here has been signed, notarized or
 published. Items marked OWNER need your Apple Developer account or a GitHub action from you.
@@ -7,11 +7,11 @@ published. Items marked OWNER need your Apple Developer account or a GitHub acti
 
 - `.github/workflows/release.yml` runs on any tag `v*` (macOS 14 runner, Apple Silicon).
 - It checks that the tag equals `version` in `app/tauri.conf.json` (for example tag `v0.1.0` and version `0.1.0`).
-- It builds `DigUp.app` with `cargo tauri build --bundles app`, zips it with `ditto`, writes a SHA-256 file, and
+- It builds `Dig-the-f-up.app` with `cargo tauri build --bundles app`, zips it with `ditto`, writes a SHA-256 file, and
   attaches both to a **draft** GitHub release. Nothing is published automatically.
 - Zip names:
-  - `DigUp-<version>-macos-arm64.zip` when signing secrets exist.
-  - `DigUp-<version>-macos-arm64-UNSIGNED.zip` when they do not. The release notes say so.
+  - `Dig-the-f-up-<version>-macos-arm64.zip` when signing secrets exist.
+  - `Dig-the-f-up-<version>-macos-arm64-UNSIGNED.zip` when they do not. The release notes say so.
 
 ## Owner checklist
 
@@ -27,9 +27,9 @@ published. Items marked OWNER need your Apple Developer account or a GitHub acti
 ### 2. Unsigned release (no secrets)
 
 The workflow works with no secrets. The zip is **not** signed or notarized, so Gatekeeper blocks the first launch.
-Tell testers: right-click `DigUp.app` and choose Open, then confirm. Or remove the quarantine flag after unzipping:
+Tell testers: right-click `Dig-the-f-up.app` and choose Open, then confirm. Or remove the quarantine flag after unzipping:
 
-    xattr -dr com.apple.quarantine /Applications/DigUp.app
+    xattr -dr com.apple.quarantine /Applications/Dig-the-f-up.app
 
 ### 3. Signed and notarized release (OWNER)
 

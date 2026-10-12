@@ -1,6 +1,6 @@
 # Third-party components
 
-What the DigUp desktop app (`app/`, macOS Apple Silicon) contains or needs at run time. Checked against the source
+What the Dig-the-f-up desktop app (`app/`, macOS Apple Silicon) contains or needs at run time. Checked against the source
 and the build scripts; the bundle contents were not inspected after a release build.
 
 ## Compiled into the app
@@ -23,7 +23,7 @@ frameworks reached through the Tauri and `objc2-*` crates are also system-provid
 | EmbeddingGemma 2 model (`embeddinggemma-2-Q8_0.gguf`, `mmproj-embeddinggemma-2-Q8_0.gguf`) | Downloaded at run time from the pinned Hugging Face revision into the data folder. Not in the `.app`. Model license: Apache 2.0 (Google DeepMind). |
 | ffmpeg / ffprobe | Video metadata and frames are read by running the `ffmpeg` and `ffprobe` programs that the user has installed (`crates/dtfu-extract-video`). Not bundled. Without them, video files cannot be indexed (`VideoError::Missing`, "ffmpeg not found"). |
 | pdfium | Used only on non-macOS builds, or on macOS with the `pdfium` feature for tests. The macOS app uses PDFKit. Not bundled. |
-| DigUp (Swift) | Not included. Its MIT copyright notice is kept in `NOTICE`. |
+| DigUp (original Swift app by Abdur Rahim) | Not included. Its MIT copyright notice is kept in `NOTICE`. |
 
 ## Rust crates
 

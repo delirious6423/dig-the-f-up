@@ -53,7 +53,7 @@ encoder resident. Not measured yet: real photo/PDF/video corpus, large-index sca
 
 ## D1. Rust pipeline, first end-to-end run (2026-10-11) — INCOMPLETE (no PDF, video frames or OCR yet)
 
-Machine/corpus as A2 (M4, 16 GB; `synthetic/` + `traps/`). Command: `digup index --index baseline/rs-index ~/DigUpTestbed/synthetic ~/DigUpTestbed/traps`
+Machine/corpus as A2 (M4, 16 GB; `synthetic/` + `traps/`). Command: `dtfu index --index baseline/rs-index ~/DigUpTestbed/synthetic ~/DigUpTestbed/traps`
 (release build, Metal, n=1). Not comparable to Swift's 38.8 s yet: the 5 PDFs, 2 videos and screenshot OCR are not done.
 
 | measure | Rust | Swift (A2) |
@@ -71,7 +71,7 @@ The misses are the pdf-page, video-moment, ar/bn-pdf tags (0.00 by construction)
 
 ## D2. Eval quality after PDF / video / OCR / RTF-charset fixes (2026-10-11)
 
-Index: `digup index` of `synthetic/` + `traps/` (M4, n=1). First pass 24.4 s + long-file backfill 7.3 s (Swift: 38.8 s for both).
+Index: `dtfu index` of `synthetic/` + `traps/` (M4, n=1). First pass 24.4 s + long-file backfill 7.3 s = 31.7 s (Swift: 38.8 s for both).
 ALL rows, R@1 / R@5 / R@10 / MRR: synthetic 0.95 / 0.97 / 0.97 / 0.96 (Swift 0.95 / 1.00 / 1.00 / 0.97);
 multilingual 0.88 / 0.98 / 0.98 / 0.92 (Swift 0.92 / 0.98 / 0.98 / 0.94). Code eval not run yet (needs `--code` index).
 Bug found by the multilingual eval: RTF `\'hh` bytes were always decoded as cp1252; now the font's `\fcharset` / `\ansicpg` is honoured.
@@ -93,7 +93,7 @@ After reading macOS's screenshot attribute (`kMDItemIsScreenCapture`, 8 of the t
 
 Search parity on the SAME index: `scripts/compare-swift-search.py` runs all 126 eval queries through both CLIs on the Swift-built `baseline/index`: 126 of 126 return the identical top-10 order.
 
-Index time (synthetic + traps, first pass / long-file backfill / code index of 39 files): Rust 25.1 s / 6.3 s / 1.7 s; Swift 38.8 s total / 2.72 s code. One run each, small corpus.
+Index time (synthetic + traps, first pass / long-file backfill / code index of 39 files): Rust 25.1 s / 6.3 s / 1.7 s; Swift 38.8 s total / 2.72 s code. One run each, small corpus. Like with like: 25.1 + 6.3 = 31.4 s vs 38.8 s, about 1.24x faster to a complete index (not 25 s vs 38.8 s). Cold query is slower than Swift: 0.60 s vs 0.45 s (D1).
 
 ## D4. Embedding throughput (`cargo run --release -p dtfu-embed --example bench_embed`, M4 10 cores, n=1)
 
@@ -111,7 +111,7 @@ The x86 AVX2 / AVX-512 scan kernels exist but are UNTESTED: Rosetta does not rep
 
 ## B2. Ranking parity with the Swift CLI (Phase B acceptance)
 
-Setup: DigUp 0.6.0 release CLI (`DigUp.app/Contents/Helpers/digup`, arm64) indexed `~/DigUpTestbed` (synthetic, traps, zh; code index separately) into a scratch index. The Rust `digup eval` and `digup search` then ran on a copy of that same index (so vectors are identical and only search/fusion differ). M4, Metal, same GGUFs.
+Setup: DigUp 0.6.0 release CLI (`DigUp.app/Contents/Helpers/digup`, arm64) indexed `~/DigUpTestbed` (synthetic, traps, zh; code index separately) into a scratch index. The Rust `dtfu eval` and `dtfu search` then ran on a copy of that same index (so vectors are identical and only search/fusion differ). M4, Metal, same GGUFs.
 Result: `eval` output of `evals/synthetic.json` (37 q), `multilingual.json` (48 q) and `code.json` (41 q) is line-for-line identical after whitespace squeezing (R@1/R@5/R@10/MRR: 0.92/1.00/1.00/0.95, 0.90/0.98/0.98/0.93, 1.00 x4). `search` for three ad hoc queries gives the same hits in the same order. Known cosmetic difference: Arabic excerpt truncation can end one character earlier (grapheme vs `char` counting); the scan output of the SIMD kernel changes no ranking.
 Not covered: the x86 AVX2/AVX-512 kernels compile for `x86_64-unknown-linux-gnu` (scan.rs checked in a scratch crate) but have not run.
 
@@ -275,8 +275,8 @@ about 1.7-2.5 s on first call.
 Cost of the abort callback (needed for the timeout) on Metal: LightOn run with `DTFU_OCR_NO_ABORT=1` gave median 1.469 s / p95 2.104 s vs
 1.476 s / 2.015 s with it (n=95 each, load 2.0-2.2): no measurable difference.
 
-**Retrieval** (`digup eval reference/digup-swift/evals/synthetic.json`, 37 queries, index of `~/DigUpTestbed/{synthetic,traps}` built
-with `DTFU_OCR=vision` and `DTFU_OCR=lighton`, `digup` built with `--features lighton`; earlier run, 12-image era, load 3.3-3.7): identical in
+**Retrieval** (`dtfu eval reference/digup-swift/evals/synthetic.json`, 37 queries, index of `~/DigUpTestbed/{synthetic,traps}` built
+with `DTFU_OCR=vision` and `DTFU_OCR=lighton`, `dtfu` built with `--features lighton`; earlier run, 12-image era, load 3.3-3.7): identical in
 both, ALL R@1 0.95 / R@5 1.00 / R@10 1.00 / MRR 0.97; screenshot tag (6 q) 0.83 / 1.00 / 1.00 / 0.92; exact tag (5 q) 1.00 everywhere.
 The set is saturated, so it cannot separate the engines. Indexing the 88 files: 35.8 s and 1.36 GB peak RSS (Vision) vs 70.1 s and 2.41 GB
 (LightOn), n=1. In that index LightOn returned more text for two screenshots: `shot_weather.png` 215 chars vs 101, and the Bengali
