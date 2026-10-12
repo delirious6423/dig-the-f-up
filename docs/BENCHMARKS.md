@@ -125,3 +125,52 @@ Random unit vectors and a 2000-word synthetic vocabulary (70% text / 20% image /
 | 1M | 33.7 s | 2.4 GB | 8.4-10.4 s | 17.1 | 39-46 | 138 (was 7504) | 72 (was 182) |
 
 The first FTS implementation joined every matched row into `segments` (341k rows for the common word at 1M); `keyword_stage` now takes the top 1000 rowids by bm25 from `fts` alone and joins only the rows it walks. Rankings are unchanged: `tests/fts_equivalence.rs` (seeded 20k segments, orphan rows, both caps, Arabic/Bengali, prefixes) compares against the kept legacy SQL, and `scripts/compare-swift-search.py` still gives 126/126 identical top-10. Set `DIGUP_SEARCH_TRACE=1` for per-stage timings. Swift's search was not measured at this scale (it was not run on a 1M index), so no speed-up over Swift is claimed here.
+
+## OCR1. LightOnOCR-3-0.8B vs Apple Vision (2026-10-12, branch feat/ocr-lighton)
+
+Machine: MacBook Pro `Mac16,3`, Apple M4, 16 GiB (`hw.memsize` 17179869184), macOS 26.5.2, Metal. llama.cpp b11461 (vendored build),
+LightOnOCR-3-0.8B Q8_0 + mmproj F16 (mradermacher GGUF, revision `d769923...`), greedy decoding, 1024-token cap, empty prompt
+with the thinking block closed (without `<think>\n\n</think>\n\n` the model starts with a `<think>` and an image stub; measured).
+Image longest side capped at 2048 px by our code. Release builds, `CARGO_TARGET_DIR` shared.
+**ocrs was not measured**: its two `.rten` models are not installed and were not downloaded (no approval to fetch).
+
+**Corpus** (`evals/ocr/corpus`, made by `swiftc evals/ocr/gen_corpus.swift`): 12 PNGs rendered from known strings with AppKit
+(so no engine is the reference): English body, small UI text (10 pt), dark mode, code (Menlo, dark), low contrast (#A6A6A6 on white),
+Simplified and Traditional Chinese (one at 11 pt), Arabic (RTL), Russian, mixed EN/ZH menu with URL and e-mail, numeric table,
+and a 2560x1440 "retina" dark terminal. Score = character error rate (Levenshtein over characters, all whitespace removed) against
+the ground truth; lower is better. Markdown the model adds (code fences, `#`) counts as error.
+
+Commands (run `evals/ocr/gen_corpus` once first):
+```
+cargo build --release -p digup-ocr --features lighton,ocrs --example ocr_bench
+/usr/bin/time -l target/release/examples/ocr_bench evals/ocr/corpus 5 vision     # one process per engine, for peak RSS
+DIGUP_LIGHTON_MODELS=models/lightonocr /usr/bin/time -l target/release/examples/ocr_bench evals/ocr/corpus 5 lighton
+```
+The tool waits for 1-min load < 4 before timing (up to 25 min) and prints the highest load seen. n = 12 images x 5 runs = 60 timed
+runs per engine after one untimed warm-up call (model load).
+
+| engine | median s/img | p95 s/img | chars (truth 1,560 non-space) | micro-CER | peak RSS | max load while timed |
+|---|---|---|---|---|---|---|
+| Apple Vision | 0.077 | 0.148 | 1,538 | 0.0184 | 231 MB | 3.59 |
+| LightOnOCR-3 Q8_0 | 1.518 | 4.402 | 1,597 | **0.0084** | 1.60 GB (footprint 0.94 GB) | 2.36 |
+
+(`chars` is the length of the returned text including whitespace; the truth column is for scale only.) Model load: 2.5 s (first
+call, includes Metal warm-up). Per image CER (Vision / LightOn): ar_body 0.000 / 0.016, code_dark 0.058 / 0.036, en_body_light 0 / 0,
+en_dark_mode 0 / 0, en_small_ui 0.060 / 0.010, low_contrast 0 / 0, mixed_menu 0.010 / 0.010, retina_small_dark 0 / 0, ru_body 0 / 0.014,
+table_numbers 0.011 / 0, zh_hans_body 0 / 0, zh_hant_small 0.049 / 0.024. An earlier LightOn run at load 3.5-4.2 gave median 1.528 s
+(flagged not final by the tool; the table shows the clean rerun). The 2560x1440 image costs 4.5 s (about 4x the others, more vision tokens).
+
+**Retrieval** (`digup eval reference/digup-swift/evals/synthetic.json`, 37 queries, index of `~/DigUpTestbed/{synthetic,traps}` built
+with `DIGUP_OCR=vision` and `DIGUP_OCR=lighton`, `digup` built with `--features lighton`): identical in both, ALL R@1 0.95 / R@5 1.00 /
+R@10 1.00 / MRR 0.97; screenshot tag (6 q) 0.83 / 1.00 / 1.00 / 0.92; exact tag (5 q) 1.00 everywhere. The set is saturated, so it
+cannot separate the engines. Index of the 88 files: 35.8 s and 1.36 GB peak RSS (Vision) vs 70.1 s and 2.41 GB (LightOn), n=1, load 3.3-3.7.
+In that index LightOn returned far more text for two screenshots: `shot_weather.png` 215 chars vs 101, and the Bengali `wallet_failed_bn.png`
+356 vs 84 chars (Vision misses Bengali; chars are not accuracy, no ground truth for those two).
+
+**Verdict.** LightOn is more accurate on this corpus (micro-CER 0.0084 vs 0.0184), clearly better on small UI text (0.010 vs 0.060),
+code, Traditional Chinese, and apparently Bengali; Vision is better on Arabic and Russian here and is exact on the clean cases. LightOn
+costs about 20x the time per image (1.5 s vs 0.08 s median, 4.4 s p95) and 7x the memory, and as an LLM it can silently "fix" text: in
+`code_dark` it rewrote `println!("{i}: {}", ...)` as `"{}: {}"`, and it adds markdown fences. Recommendation: keep **Apple Vision as
+the macOS default**; ship LightOn as an **optional engine** (`DIGUP_OCR=lighton`, feature `lighton`, +1 GB download) for non-Latin scripts
+Vision lacks (Bengali etc.) and for small text, and as the candidate default on Windows/Linux if it beats `ocrs` there (not measured:
+CPU speed unknown, `ocrs` models absent). Not dropped. Open: measure `ocrs`, measure on a Windows/Linux CPU, larger real-screenshot set.
