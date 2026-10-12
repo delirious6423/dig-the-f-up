@@ -10,6 +10,13 @@ and the build scripts; the bundle contents were not inspected after a release bu
 | llama.cpp (with mtmd) | b11461 plus `patches/llama.cpp-no-logits.patch` (from DigUp) | MIT | Static libraries from `scripts/build-llama.sh`, linked by `crates/dtfu-llama-sys` (its build script links `ggml-metal` on Apple targets). |
 | Rust crates | see the table below and `scripts/gen-third-party-licenses.sh` | per crate | Compiled in (static). |
 
+## Shipped as separate programs or libraries (release packages)
+
+| Component | Version / source | License | How it is included |
+| --- | --- | --- | --- |
+| FFmpeg: `ffmpeg` and `ffprobe` executables | 7.1.5. LGPL-2.1-or-later build made by `scripts/build-ffmpeg.sh` with `--disable-gpl --disable-nonfree`. Unmodified source: https://ffmpeg.org/releases/ffmpeg-7.1.5.tar.xz (SHA-256 `de668509caf9e35e3cd162473441fdb29538c6d96ed080292b3cf9e6fc5d558f`) | LGPL-2.1-or-later | Bundled in the app packages. Run as separate programs, not linked into the app. The script and its configure flags let anyone rebuild the programs or replace them with their own build. |
+| pdfium | Prebuilt library from the bblanchon/pdfium-binaries release `chromium/8066`. Fetched and SHA-256-checked by `scripts/fetch-pdfium.sh`. | BSD-3-Clause / Apache-2.0 (Chromium and PDFium authors) | Windows and Linux packages only. The licence file ships in the package as `LICENSE-pdfium.txt`. macOS uses PDFKit instead. |
+
 ## Apple system frameworks (linked, not shipped)
 
 Linked from the macOS SDK; they are part of macOS and are not in the bundle: Accelerate, Metal, MetalKit, Foundation
@@ -23,8 +30,8 @@ frameworks reached through the Tauri and `objc2-*` crates are also system-provid
 | EmbeddingGemma 2 model (`embeddinggemma-2-Q8_0.gguf`, `mmproj-embeddinggemma-2-Q8_0.gguf`) | Downloaded at run time from the pinned Hugging Face revision into the data folder. Not in the `.app`. Model license: Apache 2.0 (Google DeepMind). |
 | LightOnOCR-3-0.8B (`LightOnOCR-3-0.8B.Q8_0.gguf`, `LightOnOCR-3-0.8B.mmproj-f16.gguf`) | All platforms: downloaded at run time (about 1 GB) from the community GGUF conversion mradermacher/LightOnOCR-3-0.8B-GGUF at a pinned revision into `<models dir>/lightonocr`, pinned by size and SHA-256 (`crates/dtfu-models`). Not bundled. Model by LightOn, Apache-2.0 (https://huggingface.co/lightonai/LightOnOCR-3-0.8B); used unmodified. |
 | ocrs OCR models (`text-detection.rten`, `text-recognition.rten`) | Windows and Linux only: downloaded at run time (12 MB) from the ocrs project's model bucket into `<data dir>/Dig-the-f-up/ocr`, pinned by size and SHA-256 (`crates/dtfu-models`). Not bundled. Models by Robert Knight, CC-BY-SA 4.0 (https://huggingface.co/robertknight/ocrs), trained on HierText (CC-BY-SA 4.0); used unmodified. The `ocrs` and `rten` crates are MIT/Apache-2.0. |
-| ffmpeg / ffprobe | Video metadata and frames are read by running the `ffmpeg` and `ffprobe` programs that the user has installed (`crates/dtfu-extract-video`). Not bundled. Without them, video files cannot be indexed (`VideoError::Missing`, "ffmpeg not found"). |
-| pdfium | Used only on non-macOS builds, or on macOS with the `pdfium` feature for tests. The macOS app uses PDFKit. Not bundled. |
+| ffmpeg / ffprobe | Source builds: read by running the `ffmpeg` and `ffprobe` programs that the user has installed (`crates/dtfu-extract-video`). Without them, video files cannot be indexed (`VideoError::Missing`, "ffmpeg not found"). Release packages bundle them; see the section above. |
+| pdfium | Used only on non-macOS builds, or on macOS with the `pdfium` feature for tests. The macOS app uses PDFKit. Source builds: not bundled. Windows and Linux release packages bundle it; see the section above. |
 | DigUp (original Swift app by Abdur Rahim) | Not included. Its MIT copyright notice is kept in `NOTICE`. |
 
 ## Rust crates

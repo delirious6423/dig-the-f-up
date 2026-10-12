@@ -12,17 +12,53 @@ to run on macOS, Windows and Linux. The name nods to the f-tools that inspired t
 
 ## Status: early, macOS first
 
-- **macOS (Apple Silicon):** works. The CLI and desktop app run end to end with Metal. There is no signed release yet,
-  so you build it yourself.
+- **macOS (Apple Silicon):** works. The CLI and desktop app run end to end with Metal. The app is not signed yet, so
+  macOS asks you to confirm it once (see [Install](#install)). Release packages for Windows and Linux are coming with
+  the first tagged release; until then, build from source.
 - **Windows and Linux:** they build and pass the unit tests in CI, but have not been verified on real machines
   ([#1](https://github.com/delirious6423/dig-the-f-up/issues/1), [#2](https://github.com/delirious6423/dig-the-f-up/issues/2)).
 
 Search quality matches the original. On DigUp's own eval sets the scores are equal, and all 126 eval queries return the
 same top 10 on the same index. Speed numbers are in [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md).
 
+## Install
+
+Release packages are coming with the first tagged release. Get them from the
+[GitHub Releases page](https://github.com/delirious6423/dig-the-f-up/releases).
+
+**Mac (Apple Silicon)**
+
+1. Download the `.dmg` file.
+2. Open it.
+3. Drag **Dig-the-f-up** into **Applications**.
+4. Open **Dig-the-f-up** from Applications.
+5. The first time, macOS says it cannot verify the app. This is because the app is not signed yet. Do this once:
+   open **System Settings > Privacy & Security**, scroll down, click **Open Anyway**, and confirm.
+
+**Windows**
+
+1. Download the **Setup** `.exe` file and run it.
+2. If **Windows protected your PC** appears, click **More info**, then **Run anyway**.
+3. The app installs for your user account only. You do not need administrator rights.
+
+**Linux**
+
+- AppImage: download the file, allow it to run (right-click the file, open **Properties > Permissions**, and tick
+  **Allow executing as program**; or run `chmod +x` on the file), then double-click it.
+- Or install the `.deb` file with `sudo apt install ./file.deb`.
+
+**First start**
+
+- The app downloads what it needs on first launch: the search model (about 1 GB) and the OCR model (about 1 GB).
+  You need an internet connection for this step. After that, search runs on your computer.
+- Video support (ffmpeg) and PDF support are included.
+
+Windows and Linux have not been checked on real machines yet (see [Status](#status-early-macos-first)).
+
 ## Build and run (Apple Silicon Mac)
 
-You need Rust, CMake (`brew install cmake`) and, for video, ffmpeg (`brew install ffmpeg`).
+For developers. You need Rust, CMake (`brew install cmake`) and, for video in a source build, ffmpeg
+(`brew install ffmpeg`). Release packages already include ffmpeg.
 
 ```bash
 git clone https://github.com/delirious6423/dig-the-f-up && cd dig-the-f-up

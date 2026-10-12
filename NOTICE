@@ -14,8 +14,10 @@ of this code.
 The on-disk index schema (version 5), search scoring, prompts and indexing constants are taken from that project's
 Swift sources so that indexes and search quality stay comparable.
 
-Other components: llama.cpp b11461 (MIT, compiled into the app; notice below). Full component list and Rust crate
-licenses: docs/THIRD-PARTY.md and scripts/gen-third-party-licenses.sh.
+Other components: llama.cpp b11461 (MIT, compiled into the app; notice below). FFmpeg 7.1.5 (LGPL-2.1-or-later;
+ffmpeg and ffprobe, bundled as separate programs in release packages). pdfium (BSD-3-Clause / Apache-2.0; bundled in
+Windows and Linux packages, licence in LICENSE-pdfium.txt). Full component list and Rust crate licenses:
+docs/THIRD-PARTY.md and scripts/gen-third-party-licenses.sh.
 
 Models (not shipped in the app, downloaded at run time from pinned Hugging Face revisions):
 
