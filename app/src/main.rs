@@ -252,12 +252,31 @@ async fn model_present() -> bool {
     model_ok()
 }
 
+/// Set by `cancel_download`; checked between download chunks.
+static CANCEL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Total size of the two model files, from the pinned manifest (not from disk).
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ModelInfo {
+    total_bytes: u64,
+    text_bytes: u64,
+    mmproj_bytes: u64,
+}
+
+#[tauri::command]
+fn model_info() -> ModelInfo {
+    let (text, mmproj) = (digup_models::TEXT.bytes, digup_models::MMPROJ.bytes);
+    ModelInfo { total_bytes: text + mmproj, text_bytes: text, mmproj_bytes: mmproj }
+}
+
 #[tauri::command]
 fn download_models(app: AppHandle) -> Res<()> {
     static BUSY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     if BUSY.swap(true, std::sync::atomic::Ordering::SeqCst) {
         return Err("download already running".into());
     }
+    CANCEL.store(false, std::sync::atomic::Ordering::SeqCst);
     std::thread::spawn(move || {
         struct Done;
         impl Drop for Done {
@@ -267,26 +286,41 @@ fn download_models(app: AppHandle) -> Res<()> {
         }
         let _done = Done;
         let dir = digup_models::models_dir();
-        for file in [&digup_models::TEXT, &digup_models::MMPROJ] {
-            let mut last = 0u64;
-            let mut progress = |done: u64, total: u64| {
-                // Throttle to roughly every 256 KiB, always pass the final tick.
-                if done == total || done.saturating_sub(last) >= 256 * 1024 {
-                    last = done;
-                    let _ = app.emit("model-progress", serde_json::json!({"name": file.name, "done": done, "total": total}));
-                }
+        let files = [digup_models::TEXT, digup_models::MMPROJ];
+        let mut last: Option<(String, u64)> = None;
+        let mut progress = |name: &str, done: u64, total: u64| {
+            // Throttle to roughly every 256 KiB per file, always pass the final tick.
+            let stepped = match &last {
+                Some((n, l)) if n == name => done.saturating_sub(*l) >= 256 * 1024,
+                _ => true,
             };
-            if let Err(e) = digup_models::download(file, &dir, None, &mut progress) {
-                let _ = app.emit("model-error", format!("{}: {e:#}", file.name));
-                return;
+            if done == total || stepped {
+                last = Some((name.to_string(), done));
+                let _ = app.emit("model-progress", serde_json::json!({"name": name, "done": done, "total": total}));
             }
-        }
-        let _ = app.emit("model-ready", ());
-        if let Some(engine) = app.try_state::<Arc<Engine>>() {
-            let _ = engine.start_indexing();
+        };
+        match digup_models::download_all(&files, &dir, None, &CANCEL, &mut progress) {
+            Ok(_) => {
+                let _ = app.emit("model-ready", ());
+                if let Some(engine) = app.try_state::<Arc<Engine>>() {
+                    let _ = engine.start_indexing();
+                }
+            }
+            Err(e) if digup_models::is_cancelled(&e) => {
+                let _ = app.emit("model-cancelled", "Download cancelled. Partial files are kept and will resume.");
+            }
+            Err(e) => {
+                let _ = app.emit("model-error", format!("{e:#}"));
+            }
         }
     });
     Ok(())
+}
+
+/// Asks a running download to stop after the current chunk. Partial files are kept.
+#[tauri::command]
+fn cancel_download() {
+    CANCEL.store(true, std::sync::atomic::Ordering::SeqCst);
 }
 
 /// Only existing files under an indexed folder may be opened or revealed.
@@ -426,7 +460,7 @@ fn main() {
         .plugin(gs)
         .setup(move |app| {
             use tauri_plugin_global_shortcut::GlobalShortcutExt;
-            let base = dirs::data_dir().unwrap_or_else(std::env::temp_dir).join("DigUp-rs");
+            let base = digup_models::app_data_dir();
             std::fs::create_dir_all(&base)?;
             let engine = Arc::new(Engine::open(EngineConfig { index_dir: base.join("index"), settings_file: base.join("settings.json") })?);
 
@@ -462,7 +496,7 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             search, status, counts, live, set_watch, set_usage_tracking, clear_usage, folders, add_folder, remove_folder, suggested_folders, pick_folder, start_indexing,
-            pause, resume, model_present, download_models, open_hit, reveal_path, quit, thumbnail
+            pause, resume, model_present, model_info, download_models, cancel_download, open_hit, reveal_path, quit, thumbnail
         ])
         .build(tauri::generate_context!())
         .expect("error while building DigUp")
