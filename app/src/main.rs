@@ -6,12 +6,13 @@ use std::sync::Arc;
 
 use digup_engine::{Engine, EngineConfig, EngineEvent, Hit, IndexCounts, Status, WatchPolicy};
 use serde::Serialize;
-use tauri::menu::{Menu, PredefinedMenuItem, Submenu};
+use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_global_shortcut::{Code, Modifiers, Shortcut, ShortcutState};
 use tauri_plugin_opener::OpenerExt;
 
+mod logging;
 mod opener;
 
 type Eng<'a> = State<'a, Arc<Engine>>;
@@ -307,9 +308,11 @@ fn download_models(app: AppHandle) -> Res<()> {
                 }
             }
             Err(e) if digup_models::is_cancelled(&e) => {
+                logging::info("model download cancelled; partial files kept");
                 let _ = app.emit("model-cancelled", "Download cancelled. Partial files are kept and will resume.");
             }
             Err(e) => {
+                logging::error(&format!("model download failed: {e:#}"));
                 let _ = app.emit("model-error", format!("{e:#}"));
             }
         }
@@ -424,8 +427,21 @@ fn toggle_window(app: &AppHandle) {
     }
 }
 
+/// Menu id of "Show Logs".
+const SHOW_LOGS: &str = "show_logs";
+
+/// Reveals the local log file in Finder (or the file manager). Logs are only ever shown, never uploaded.
+fn show_logs(app: &AppHandle) {
+    let Some(path) = logging::log_path() else { return };
+    if let Err(e) = app.opener().reveal_item_in_dir(path) {
+        logging::error(&format!("show logs: {e}"));
+    }
+}
+
 fn build_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     let app_menu = Submenu::with_items(app, "DigUp", true, &[&PredefinedMenuItem::hide(app, None)?, &PredefinedMenuItem::quit(app, None)?])?;
+    let show_logs = MenuItem::with_id(app, SHOW_LOGS, "Show Logs", true, None::<&str>)?;
+    let help = Submenu::with_items(app, "Help", true, &[&show_logs])?;
     let edit = Submenu::with_items(
         app,
         "Edit",
@@ -440,7 +456,7 @@ fn build_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
             &PredefinedMenuItem::select_all(app, None)?,
         ],
     )?;
-    Menu::with_items(app, &[&app_menu, &edit])
+    Menu::with_items(app, &[&app_menu, &edit, &help])
 }
 
 fn main() {
@@ -458,10 +474,20 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(gs)
+        .on_menu_event(|app, event| {
+            if event.id() == SHOW_LOGS {
+                show_logs(app);
+            }
+        })
         .setup(move |app| {
             use tauri_plugin_global_shortcut::GlobalShortcutExt;
             let base = digup_models::app_data_dir();
             std::fs::create_dir_all(&base)?;
+            // A log file that cannot be created must not stop the app; logging is then a no-op.
+            if let Err(e) = logging::init(&digup_models::logs_dir()) {
+                eprintln!("log file: {e}");
+            }
+            logging::info(&format!("DigUp {} starting; data folder {}", env!("CARGO_PKG_VERSION"), base.display()));
             let engine = Arc::new(Engine::open(EngineConfig { index_dir: base.join("index"), settings_file: base.join("settings.json") })?);
 
             // Forward engine events to the front end.
@@ -469,13 +495,16 @@ fn main() {
             let handle = app.handle().clone();
             std::thread::spawn(move || {
                 while let Ok(ev) = rx.recv() {
+                    if let EngineEvent::Error(m) = &ev {
+                        logging::error(&format!("indexing: {m}"));
+                    }
                     let _ = handle.emit("engine-event", event_json(ev));
                 }
             });
 
             if !engine.folders().is_empty() && model_ok() {
                 if let Err(e) = engine.start_indexing() {
-                    eprintln!("start_indexing: {e:#}");
+                    logging::error(&format!("start_indexing: {e:#}"));
                 }
             }
             app.manage(engine);
@@ -484,7 +513,7 @@ fn main() {
             // Cmd+Shift+Space on macOS, Ctrl+Shift+Space elsewhere.
             let sc = if cfg!(target_os = "macos") { shortcut } else { shortcut_ctrl };
             if let Err(e) = app.global_shortcut().register(sc) {
-                eprintln!("global shortcut: {e}");
+                logging::error(&format!("global shortcut: {e}"));
             }
             Ok(())
         })
