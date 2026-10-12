@@ -149,12 +149,12 @@ DIGUP_LIGHTON_MODELS=models/lightonocr /usr/bin/time -l target/release/examples/
 The tool waits for 1-min load < 4 before timing (up to 25 min) and prints the highest load seen. n = 12 images x 5 runs = 60 timed
 runs per engine after one untimed warm-up call (model load).
 
-| engine | median s/img | p95 s/img | chars (truth 1,560 non-space) | micro-CER | peak RSS | max load while timed |
+| engine | median s/img | p95 s/img | chars returned | micro-CER | peak RSS | max load while timed |
 |---|---|---|---|---|---|---|
 | Apple Vision | 0.077 | 0.148 | 1,538 | 0.0184 | 231 MB | 3.59 |
 | LightOnOCR-3 Q8_0 | 1.518 | 4.402 | 1,597 | **0.0084** | 1.60 GB (footprint 0.94 GB) | 2.36 |
 
-(`chars` is the length of the returned text including whitespace; the truth column is for scale only.) Model load: 2.5 s (first
+(`chars` is the length of the returned text including whitespace; ground truth is 1,303 non-space characters.) Model load: 2.5 s (first
 call, includes Metal warm-up). Per image CER (Vision / LightOn): ar_body 0.000 / 0.016, code_dark 0.058 / 0.036, en_body_light 0 / 0,
 en_dark_mode 0 / 0, en_small_ui 0.060 / 0.010, low_contrast 0 / 0, mixed_menu 0.010 / 0.010, retina_small_dark 0 / 0, ru_body 0 / 0.014,
 table_numbers 0.011 / 0, zh_hans_body 0 / 0, zh_hant_small 0.049 / 0.024. An earlier LightOn run at load 3.5-4.2 gave median 1.528 s
