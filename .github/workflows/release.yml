@@ -122,7 +122,7 @@ jobs:
           workspace: app
 
       - name: Install build tools
-        run: brew install cmake nasm
+        run: brew install cmake nasm meson ninja pkgconf
 
       - name: Build llama.cpp (b11461 + patch, Metal)
         shell: bash
@@ -239,7 +239,7 @@ jobs:
         with:
           msystem: MINGW64
           path-type: inherit
-          install: make diffutils nasm mingw-w64-x86_64-gcc
+          install: make diffutils nasm mingw-w64-x86_64-gcc mingw-w64-x86_64-meson mingw-w64-x86_64-ninja mingw-w64-x86_64-pkgconf
 
       - name: Build ffmpeg and ffprobe
         shell: msys2 {0}
@@ -310,7 +310,7 @@ jobs:
       - name: Install build tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake clang libclang-dev nasm build-essential curl wget file \
+          sudo apt-get install -y cmake clang libclang-dev nasm meson ninja-build pkg-config build-essential curl wget file \
             libwebkit2gtk-4.1-dev libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf
 
       - name: Cache llama.cpp build

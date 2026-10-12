@@ -15,7 +15,7 @@ The on-disk index schema (version 5), search scoring, prompts and indexing const
 Swift sources so that indexes and search quality stay comparable.
 
 Other components: llama.cpp b11461 (MIT, compiled into the app; notice below). FFmpeg 7.1.5 (LGPL-2.1-or-later;
-ffmpeg and ffprobe, bundled as separate programs in release packages). pdfium (BSD-3-Clause / Apache-2.0; bundled in
+ffmpeg and ffprobe, bundled as separate programs in release packages; they statically link dav1d 1.5.4, BSD-2-Clause, VideoLAN). pdfium (BSD-3-Clause / Apache-2.0; bundled in
 Windows and Linux packages, licence in LICENSE-pdfium.txt). Full component list and Rust crate licenses:
 docs/THIRD-PARTY.md and scripts/gen-third-party-licenses.sh.
 
