@@ -1,11 +1,8 @@
 # dig-the-f-up handoff
 
-This document hands a running project from a Claude session (cloud workspace, Linux x86, 2 cores, no GPU) to a Claude
-Code session on the owner's Apple Silicon Mac. You are expected to **continue autonomously to a finished, shippable
-cross-platform product**. Everything you need to understand intent, state, decisions and next steps is here.
-
-**Kickoff prompt the owner will paste:** *"Read CLAUDE.md and docs/HANDOFF.md in full, run the bootstrap in section 6,
-confirm the parity test passes on this Mac, then continue the roadmap in section 8 as a continuous autonomous agent."*
+The project guide: why this port exists, where it stands, the decisions behind it, and the roadmap with acceptance
+tests. The specs in `docs/spec-*.md` hold the detailed behaviour of the original, with `file:line` citations into
+it (fetch the source with `scripts/fetch-reference.sh`).
 
 ---------------------------------------------------------------------------------------------------
 
@@ -18,9 +15,6 @@ into one SQLite file of 768-d vectors plus an FTS5 keyword index, using Google D
 "describe it, dig it up": a query embeds in milliseconds and is matched against every vector, fused with exact-word
 matches. Everything is on-device.
 
-The owner's words: *"Can we write this in rust so it can run on all platforms not just mac. Estimate the speed up if we
-write in rust and pull all levers for max performance."* Then, after seeing the plan: *"Let's kick things off"*, and now
-they want to continue in Claude Code.
 
 So the goals, in priority order:
 1. **Cross-platform:** macOS (**Apple Silicon only; Intel Macs are explicitly dropped by owner decision, do not add x86_64-apple-darwin targets, CI jobs or Universal binaries**), Windows, Linux. Same behaviour, same quality.
@@ -226,7 +220,7 @@ over Swift: keep it resident while the panel is likely to be used and unload aft
 
 ## 8. Roadmap (do in this order; each item has an acceptance test)
 
-Parallelism guidance is in italics. Use subagents per CLAUDE.md. After each phase run a verification round.
+Parallelism notes are in italics. After each phase, re-run the full test suite and review the diff.
 
 **Phase A. Prove the base on the Mac (inline, quick)**
 - A1. Bootstrap (section 6). *Acceptance:* `cargo test --workspace --release` green on macOS with Metal; record parity
@@ -247,7 +241,7 @@ Parallelism guidance is in italics. Use subagents per CLAUDE.md. After each phas
 - B3. Scan acceleration: runtime SIMD dispatch (AVX2+F16C, AVX-512, NEON), rayon over blocks, optional mmap sidecar.
   *Acceptance:* bench on the Mac and the cloud numbers in section 3 reproduced or beaten; rankings identical.
 
-**Phase C. Extractors (fully parallel: one subagent per modality, each with its own tests and a fixtures dir)**
+**Phase C. Extractors (independent per modality, each with its own tests and a fixtures dir)**
 - C1. Images/screenshots: decode, orient, thumbnail (max 1024 photos / 1536 screenshots, min side 256), screenshot detection,
   OCR hook. C2. PDF: text per page (needs >=200 chars, else render at 1400 px), `PageTextProblem` heuristics for
   Bengali/Arabic (re-validate against pdfium), 30-page first step. C3. Docs: txt/md/rtf/docx/odt/html -> 1800-char
@@ -325,10 +319,10 @@ Process
 Before reporting any milestone:
 1. `cargo test --workspace --release` green, including the parity test; `cargo clippy --workspace --all-targets` clean
    (not yet enforced; make it so).
-2. For anything touching unsafe/FFI: an independent strong-model review focused on ownership, lifetimes, error paths.
+2. For anything touching unsafe/FFI: an independent review focused on ownership, lifetimes, error paths.
 3. For anything touching ranking or extraction: run the evals and compare with the Swift CLI on the same corpus.
 4. For any speed claim: benchmark command, machine, and numbers in `docs/BENCHMARKS.md`; compare to the baseline.
-5. Re-run tests yourself after every subagent batch; never trust a hand-back.
+5. Re-run the tests after every batch of changes; don't rely on a reported result.
 
 ---------------------------------------------------------------------------------------------------
 
@@ -337,8 +331,7 @@ Before reporting any milestone:
 - **Q1. Reuse Swift-made indexes?** Parity is 0.9997+ for text/audio but images will be ~0.99 (different decoders).
   *Recommended:* separate index directory and a distinct `vector_source` runtime tag for Rust-made indexes; never write
   into a Swift-made index; optionally allow read-only search of one with a warning. Revisit after evals.
-- **Q2. Repo hygiene:** `git init`, first commit, GitHub remote, licence file (MIT), contributing notes. *Recommended:* yes;
-  ask the owner once for the repo name/visibility, then proceed.
+- **Q2. Repo hygiene:** DECIDED: public GitHub repo `delirious6423/dig-the-f-up`, MIT licence, CI on GitHub Actions.
 - **Q3. Desktop shell:** Tauri 2 (web UI, small, cross-platform tray/hotkey/updater) vs `egui`/`iced` (pure Rust).
   *Recommended:* Tauri 2 with a minimal front end; keep the engine headless behind a clean API so the CLI and app share it.
 - **Q4. OCR strategy off-Mac:** `ocrs` (pure Rust, lighter) vs Tesseract/PaddleOCR. *Recommended:* start with `ocrs`
@@ -347,29 +340,3 @@ Before reporting any milestone:
   ffmpeg binary (LGPL build) for video, with `symphonia` for audio-only.
 - **Q6. Naming/branding:** DECIDED: the product is "Dig-the-f-up" (repo `dig-the-f-up`, CLI `dtfu`, crates `dtfu-*`, env `DTFU_*`,
   data folder `Dig-the-f-up`), a port of DigUp by Abdur Rahim.
-
----------------------------------------------------------------------------------------------------
-
-## 12. Session history (so you know where everything came from)
-
-1. Read DigUp's README and `Package.swift` (GitHub blocks automated browsing of `Sources/`, so the source was cloned).
-2. Gave the speed-up thesis (section 3). The owner said "let's kick things off".
-3. Cloned DigUp to `/root/digup-src` (now fetched into `reference/digup-swift` by `scripts/fetch-reference.sh`). Three parallel read-only agents wrote the three
-   specs in `docs/`. Findings that shaped the plan: `llama-cpp-2` too old (D2), serial prepare stage, per-file media
-   embedding, WAV round-trip, double screenshot decode.
-4. Scaffolded the workspace; benchmarked the scan; built llama.cpp b11461 with the patch (CPU); wrote bindings and the
-   embedder; ported the Pillow resizer with tests generated from the Swift tests; passed the 9-vector parity test.
-5. A sonnet agent ported the crawler/rules (26 tests, re-run by me); an opus agent reviewed the FFI code; fixes applied.
-6. The owner's models were fetched via the desktop link: both SHA-256 values matched `ModelFiles.swift`. (The embedder
-   file had to be split to cross a 400 MB per-file transfer limit; a temp folder in Downloads was deleted afterwards.)
-7. Added portable `scripts/build-llama.sh` and `scripts/link-models.sh`, this handoff, and `CLAUDE.md`.
-   A clean-room rebuild of the repo from scratch (clone -> build -> test) was run to prove the handoff reproduces
-   (result recorded in section 13).
-
-## 13. Clean-room reproduction result
-
-Done on the cloud box (Linux x86, 2 cores, CPU only) from a fresh copy of this repo with no build artifacts:
-`scripts/build-llama.sh` (clone b11461, apply patch, cmake build, about 8 minutes on 2 cores) then
-`cargo test --workspace --release`. Result: **all green, 2 + 4 + 26 + 6 unit tests and the parity test**, with the same
-nine cosines as in section 4 (document 0.999768 ... speech 0.999665). So the repo and scripts reproduce from nothing.
-macOS/Metal, Windows and GPU backends have **not** been run; that is Phase A1 and E3.

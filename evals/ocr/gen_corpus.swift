@@ -33,7 +33,7 @@ let cases: [Case] = [
   Case(id: "table_numbers", w: 1280, h: 720, bg: 0xFFFFFF, fg: 0x111111, font: "Helvetica", pt: 14, lines: [
     "Invoice 2026-0417    Due 2026-11-02", "Widget A    12 x 3.50 = 42.00", "Widget B    7 x 11.25 = 78.75", "Total (incl. 8% tax)    130.14"]),
   Case(id: "retina_small_dark", w: 2560, h: 1440, bg: 0x121212, fg: 0xBBBBBB, font: "SFNS", pt: 20, lines: [
-    "Terminal - zsh - 120x32", "yoimac@mac ~ % git status", "On branch main, your branch is up to date with origin/main.", "nothing to commit, working tree clean"]),
+    "Terminal - zsh - 120x32", "user01@mac ~ % git status", "On branch main, your branch is up to date with origin/main.", "nothing to commit, working tree clean"]),
   // Hard variants (added after the first review): tiny text, JPEG artefacts, slight rotation, a simulated screen photo.
   Case(id: "tiny_8pt_light", w: 1280, h: 720, bg: 0xFFFFFF, fg: 0x222222, font: "Helvetica", pt: 8, lines: [
     "Terms: payment is due within 30 days of the invoice date.", "Support hours Mon-Fri 09:00-17:30 CET, ticket #48213 opened 2026-10-03.", "Reference code QX-7741-ZB, balance 2,310.55 USD"]),

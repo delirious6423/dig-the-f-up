@@ -1,4 +1,4 @@
 Terminal - zsh - 120x32
-yoimac@mac ~ % git status
+user01@mac ~ % git status
 On branch main, your branch is up to date with origin/main.
 nothing to commit, working tree clean

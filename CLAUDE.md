@@ -4,24 +4,8 @@ Cross-platform, maximum-performance Rust port of **DigUp** (the original; this p
 search over a user's files (photos, PDFs, documents, audio, video, code) with Google DeepMind's EmbeddingGemma 2.
 The original is Swift and macOS-only. This repo must run on **macOS (Apple Silicon only; Intel Macs are dropped, owner decision), Windows and Linux** and be as fast as we can make it.
 
-**Read `docs/HANDOFF.md` fully before doing anything.** It has the goal, current state, decisions, verified facts,
-the ordered roadmap with acceptance criteria, and the open questions. You are taking over a running project and are
-expected to continue it autonomously to completion, not to start over or re-plan from scratch.
-
-## How the owner wants you to work (standing preferences)
-- **Be autonomous.** Work through the roadmap in `docs/HANDOFF.md` in order. Do not stop to ask for permission on
-  things the roadmap already decides. Ask only for the items listed under "Open questions", and only when you are
-  actually blocked on them. Pick the recommended default and keep going when you are not.
-- **Use subagents proactively, without asking.** At every phase boundary, check whether the next step splits into
-  independent pieces; if so run them in parallel in a single turn. Cheaper models for mechanical search and
-  test-running, a strong model for review. Stay inline for small, single-file or tightly coupled steps.
-- **Verify before you summarize.** After a batch of implementation subagents returns, or after substantial multi-file
-  edits, run a verification round (independent agents that re-run the checks and review the diff), or state in one line
-  why it is not needed. Read-only research batches don't need one. Never accept a subagent's "tests pass" without
-  re-running the tests yourself.
-- **Make anything you need from the owner frictionless.** If you need a file, link or action from them, give the
-  direct link/command and nothing else; never make them hunt. They are on an Apple Silicon Mac.
-- Report outcomes in a sentence or two, with measured numbers. Don't narrate steps.
+Start with `docs/HANDOFF.md`: goal, current state, decisions, verified facts, the roadmap with acceptance criteria,
+and open questions.
 
 ## Non-negotiables
 1. **The parity test is the safety net.** `cargo test -p dtfu-embed --release --test parity` must keep passing
@@ -33,10 +17,8 @@ expected to continue it autonomously to completion, not to start over or re-plan
 4. **Don't modify `reference/digup-swift/`** (fetched by `scripts/fetch-reference.sh`, git-ignored, read-only). It is the Swift source at commit `6faa29e` that every
    `file:line` citation in `docs/spec-*.md` points to.
 5. **Licensing:** keep `NOTICE` (DigUp is MIT; llama.cpp MIT; EmbeddingGemma 2 Apache 2.0).
-6. Measure, don't guess. Every performance claim in code comments, docs or your reports must come from a benchmark you
-   ran, with the machine and command noted. Estimates are labelled as estimates.
-7. Don't commit or push unless the owner asks. When you do commit, end the message with the attribution lines your
-   session's system prompt specifies.
+6. Measure, don't guess. Every performance claim in code comments, docs or reports must come from a benchmark that
+   was run, with the machine and command noted. Estimates are labelled as estimates.
 
 ## Layout
 ```
@@ -84,6 +66,3 @@ cargo run --release -p dtfu-crawl --example crawl_bench -- <dir> [threads]
 `DTFU_LLAMA_BUILD` / `DTFU_LLAMA_SRC` override where `dtfu-llama-sys` looks for the build and headers.
 `DTFU_MODELS` overrides where the parity test looks for the GGUF files.
 Use `RUSTFLAGS="-C target-cpu=native"` only for local benchmarks, never for shipped binaries (see HANDOFF section 9).
-
-## Subagents (learned the hard way)
-Coding agents must be `subagent_type: "builder"` (haiku, small tool set, starts ~9K tokens). General-purpose agents start at ~46K tokens of tool schemas and die with "Autocompact is thrashing" on haiku; keep them for research. Briefs must give exact line ranges (`grep -n '^## ' docs/*.md`); never have an agent read whole specs or HANDOFF.md.

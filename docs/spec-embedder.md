@@ -1,6 +1,6 @@
 # DigUp embedding layer: Rust porting spec
 
-Source: /root/digup-src (note: the task said /home/claude/digup-src; it is actually at /root/digup-src; HEAD 6faa29e). Read-only.
+Source: DigUp at commit 6faa29e (`scripts/fetch-reference.sh` puts it in `reference/digup-swift`). Read-only.
 Line refs are real file lines (`File.swift:N`). Anything marked UNVERIFIED I could not confirm from the repo or network.
 
 ## 0. Architecture in one paragraph
