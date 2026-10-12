@@ -9,3 +9,10 @@ redistribution of this code.
 Also used: llama.cpp b11461 (MIT, compiled into the app), EmbeddingGemma 2 by Google DeepMind (Apache 2.0,
 downloaded at run time, not shipped in the app). Full component list and Rust crate licenses:
 docs/THIRD-PARTY.md and scripts/gen-third-party-licenses.sh.
+
+Optional OCR engine (cargo feature `lighton` of digup-ocr): LightOnOCR-3-0.8B by LightOn
+(https://huggingface.co/lightonai/LightOnOCR-3-0.8B), Apache License 2.0. We use the community GGUF conversion
+by mradermacher (https://huggingface.co/mradermacher/LightOnOCR-3-0.8B-GGUF, pinned revision in
+crates/digup-models), whose GGUF metadata declares `general.license = apache-2.0`.
+TODO(before shipping): read the license text on both Hugging Face model cards (no network access was used to
+verify them) and ship the Apache-2.0 license text next to the model files if they are redistributed.

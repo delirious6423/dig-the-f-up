@@ -1,0 +1,4 @@
+Settings 设置
+Language 语言: 简体中文
+Display 显示 - Brightness 亮度 70%
+Contact: support@example.com  https://example.com/help

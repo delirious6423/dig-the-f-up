@@ -632,7 +632,10 @@ name = "digup-ocr"
 version = "0.1.0"
 dependencies = [
  "ab_glyph",
+ "digup-llama-sys",
+ "digup-models",
  "dirs",
+ "image",
  "objc2",
  "objc2-core-graphics",
  "objc2-foundation",

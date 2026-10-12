@@ -1,0 +1,4 @@
+Invoice 2026-0417    Due 2026-11-02
+Widget A    12 x 3.50 = 42.00
+Widget B    7 x 11.25 = 78.75
+Total (incl. 8% tax)    130.14

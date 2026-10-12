@@ -1,24 +1,133 @@
-//! Screenshot OCR. On macOS: Apple Vision. Elsewhere: the pure-Rust `ocrs` engine
+//! Screenshot OCR. Engines: Apple Vision (macOS default), `ocrs` (default elsewhere) and, with feature `lighton`,
+//! LightOnOCR-3-0.8B; pick one with `$DIGUP_OCR` or [`recognize_rgb_with`]. On macOS: Apple Vision. Elsewhere: the pure-Rust `ocrs` engine
 //! (see `ocrs_backend`; models are not bundled, see that module's docs). On macOS the
 //! `ocrs` backend is available with `--features ocrs` through `recognize_rgb_ocrs`.
 
 #[cfg(any(not(target_os = "macos"), feature = "ocrs"))]
 mod ocrs_backend;
 
+#[cfg(feature = "lighton")]
+mod llama_backend;
+/// LightOnOCR-3-0.8B engine (feature `lighton`): model loading, options and the shared instance.
+#[cfg(feature = "lighton")]
+pub mod lighton {
+    pub use crate::llama_backend::*;
+}
+
+/// An OCR engine. All variants exist on every platform; [`Engine::is_compiled`] says whether this build has it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Engine {
+    /// Apple Vision (macOS only).
+    Vision,
+    /// The pure-Rust `ocrs` engine (off macOS, or with feature `ocrs`).
+    Ocrs,
+    /// LightOnOCR-3-0.8B through llama.cpp (feature `lighton`; model files needed, see `digup-models`).
+    Lighton,
+}
+
+/// Environment variable that selects the engine used by [`recognize_rgb`]: `vision`, `ocrs` or `lighton`.
+pub const ENGINE_ENV: &str = "DIGUP_OCR";
+
+impl Engine {
+    /// Vision on macOS, `ocrs` elsewhere.
+    pub fn platform_default() -> Engine {
+        if cfg!(target_os = "macos") {
+            Engine::Vision
+        } else {
+            Engine::Ocrs
+        }
+    }
+
+    /// Parses `vision` | `ocrs` | `lighton` (case-insensitive; `lightonocr` and `apple` are accepted aliases).
+    pub fn parse(name: &str) -> Option<Engine> {
+        match name.trim().to_ascii_lowercase().as_str() {
+            "vision" | "apple" => Some(Engine::Vision),
+            "ocrs" => Some(Engine::Ocrs),
+            "lighton" | "lightonocr" => Some(Engine::Lighton),
+            _ => None,
+        }
+    }
+
+    /// The engine named by `$DIGUP_OCR`, or the platform default when unset, empty or unknown.
+    pub fn from_env() -> Engine {
+        match std::env::var(ENGINE_ENV) {
+            Ok(v) if !v.trim().is_empty() => Engine::parse(&v).unwrap_or_else(|| {
+                eprintln!("digup-ocr: unknown {ENGINE_ENV}={v:?} (use vision, ocrs or lighton); using the default");
+                Engine::platform_default()
+            }),
+            _ => Engine::platform_default(),
+        }
+    }
+
+    /// Whether this build contains the engine (it may still lack its models at run time).
+    pub fn is_compiled(self) -> bool {
+        match self {
+            Engine::Vision => cfg!(target_os = "macos"),
+            Engine::Ocrs => cfg!(any(not(target_os = "macos"), feature = "ocrs")),
+            Engine::Lighton => cfg!(feature = "lighton"),
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Engine::Vision => "vision",
+            Engine::Ocrs => "ocrs",
+            Engine::Lighton => "lighton",
+        }
+    }
+}
+
 /// Recognize text in a packed RGB8 image (`rgb.len() >= width*height*3`).
 /// Returns recognized lines joined by "\n", or `None` if nothing was found.
-/// Uses Apple Vision on macOS and `ocrs` elsewhere.
+/// Uses the engine named by `$DIGUP_OCR` ([`Engine::from_env`]); by default Apple Vision on macOS and `ocrs`
+/// elsewhere. If the selected engine is not compiled in, or is LightOn without usable model files, a warning is
+/// logged once and the platform default is used for that call.
 pub fn recognize_rgb(width: usize, height: usize, rgb: &[u8]) -> Option<String> {
+    let engine = Engine::from_env();
+    if !engine.is_compiled() {
+        warn_once(&format!(
+            "digup-ocr: {ENGINE_ENV}={} is not available in this build (feature missing); using {}",
+            engine.name(),
+            Engine::platform_default().name()
+        ));
+        return recognize_rgb_with(Engine::platform_default(), width, height, rgb);
+    }
+    #[cfg(feature = "lighton")]
+    if engine == Engine::Lighton {
+        if !valid_image(width, height, rgb) {
+            return None;
+        }
+        return match llama_backend::try_recognize(width, height, rgb) {
+            Ok(text) => text,
+            // Model files missing or unloadable (already logged): keep OCR working with the default engine.
+            Err(llama_backend::Unavailable) => recognize_rgb_with(Engine::platform_default(), width, height, rgb),
+        };
+    }
+    recognize_rgb_with(engine, width, height, rgb)
+}
+
+fn warn_once(msg: &str) {
+    static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        eprintln!("{msg}");
+    }
+}
+
+/// Same contract as [`recognize_rgb`] with an explicit engine (no fallback: `None` for an engine that is not
+/// compiled in or lacks its models). `None` also for invalid images and images with no text.
+pub fn recognize_rgb_with(engine: Engine, width: usize, height: usize, rgb: &[u8]) -> Option<String> {
     if !valid_image(width, height, rgb) {
         return None;
     }
-    #[cfg(target_os = "macos")]
-    {
-        mac::recognize(width, height, rgb)
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        ocrs_backend::recognize(width, height, rgb)
+    match engine {
+        #[cfg(target_os = "macos")]
+        Engine::Vision => mac::recognize(width, height, rgb),
+        #[cfg(any(not(target_os = "macos"), feature = "ocrs"))]
+        Engine::Ocrs => ocrs_backend::recognize(width, height, rgb),
+        #[cfg(feature = "lighton")]
+        Engine::Lighton => llama_backend::recognize(width, height, rgb),
+        #[allow(unreachable_patterns)]
+        _ => None,
     }
 }
 
@@ -49,7 +158,7 @@ impl VisionOcr {
         VisionOcr
     }
     pub fn recognize(&self, width: usize, height: usize, rgb: &[u8]) -> Option<String> {
-        recognize_rgb(width, height, rgb)
+        recognize_rgb_with(Engine::Vision, width, height, rgb)
     }
 }
 
@@ -225,5 +334,52 @@ mod ocrs_tests {
         let blank = vec![255u8; 300 * 200 * 3];
         assert_eq!(recognize_rgb_ocrs(300, 200, &blank), None);
         assert_eq!(recognize_rgb_ocrs(0, 0, &[]), None);
+    }
+}
+
+#[cfg(test)]
+mod engine_tests {
+    use super::*;
+
+    #[test]
+    fn parse_names() {
+        assert_eq!(Engine::parse("Vision"), Some(Engine::Vision));
+        assert_eq!(Engine::parse(" ocrs "), Some(Engine::Ocrs));
+        assert_eq!(Engine::parse("lighton"), Some(Engine::Lighton));
+        assert_eq!(Engine::parse("nope"), None);
+        assert!(Engine::platform_default().is_compiled());
+    }
+
+    #[test]
+    fn invalid_image_is_none_for_every_engine() {
+        for e in [Engine::Vision, Engine::Ocrs, Engine::Lighton] {
+            assert_eq!(recognize_rgb_with(e, 0, 0, &[]), None);
+            assert_eq!(recognize_rgb_with(e, 10, 10, &[0; 5]), None);
+        }
+    }
+}
+
+#[cfg(all(test, feature = "lighton"))]
+mod lighton_tests {
+    use super::*;
+    use crate::test_util::{load_font, render};
+
+    #[test]
+    fn lighton_reads_hello_world() {
+        // Skips when the model files are absent, unless DIGUP_LIGHTON_TEST=1: then missing models FAIL the test,
+        // so CI / verification runs cannot pass without exercising real inference.
+        if !lighton::available() {
+            assert!(
+                std::env::var("DIGUP_LIGHTON_TEST").as_deref() != Ok("1"),
+                "DIGUP_LIGHTON_TEST=1 but the LightOnOCR model files were not found"
+            );
+            eprintln!("NOTE: LightOnOCR model files not found (DIGUP_LIGHTON_MODELS); skipping");
+            return;
+        }
+        let Some(font) = load_font() else { return };
+        let (w, h, img) = render("HELLO WORLD", &font);
+        let out = recognize_rgb_with(Engine::Lighton, w, h, &img).expect("some text");
+        // The test renderer's 700 px canvas clips "WORLD", so only the first word is checked.
+        assert!(out.to_uppercase().contains("HELLO"), "got {out:?}");
     }
 }

@@ -1,0 +1,4 @@
+Settings > Privacy & Security
+Allow apps to access your location: Off
+Camera access requested by Zoom, Slack and Chrome
+Last scan: 12 October 2026, no threats found

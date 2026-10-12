@@ -9,6 +9,10 @@ rust-version.workspace = true
 name = "digup"
 path = "src/main.rs"
 
+[features]
+# Lets `DIGUP_OCR=lighton` select the LightOnOCR-3 engine during indexing.
+lighton = ["digup-index/lighton"]
+
 [dependencies]
 anyhow = { workspace = true }
 digup-core = { workspace = true }

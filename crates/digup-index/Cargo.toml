@@ -8,6 +8,8 @@ license.workspace = true
 default = ["llama"]
 # Implements `Embed` for the real llama.cpp embedder. Off for fast tests with a fake embedder.
 llama = ["dep:digup-embed"]
+# OCR through LightOnOCR-3 (selected at run time with DIGUP_OCR=lighton; models: see digup-models).
+lighton = ["digup-ocr/lighton"]
 
 [dependencies]
 anyhow.workspace = true

@@ -1,0 +1,5 @@
+File  Edit  View  Window  Help
+Sync status: 3 of 12 devices are up to date. Last sync 09:41
+Storage used 118.4 GB of 256 GB   Battery 87%   Wi-Fi: Office-5G
+Notifications are muted until tomorrow 8:00 AM
+Version 4.12.3 (build 20931) - check for updates
