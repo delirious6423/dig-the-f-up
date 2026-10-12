@@ -423,7 +423,8 @@ fn lower_extension(path: &Path) -> String {
 /// Whether a folder under a code root is read: not a dependency or build folder, not a submodule or worktree, not
 /// `*.noindex`. The root itself is always read (the caller chose it).
 fn code_folder_allowed(path: &Path) -> bool {
-    rules::skip_reason_for_folder(&path.to_string_lossy(), "", &[]).is_none()
+    // The rules split on `/`; on Windows the walk gives `\`-separated paths.
+    rules::skip_reason_for_folder(&dtfu_crawl::crawler::unixify(&path.to_string_lossy()), "", &[]).is_none()
         && rules::code_skip_reason_for_folder(path).is_none()
 }
 

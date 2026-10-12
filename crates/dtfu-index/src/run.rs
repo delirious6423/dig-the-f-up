@@ -822,7 +822,7 @@ mod tests {
         let state_of = |name: &str| -> String {
             store
                 .connection()
-                .query_row("SELECT state FROM files WHERE path LIKE ?1", [format!("%/{name}")], |r| r.get(0))
+                .query_row("SELECT state FROM files WHERE path LIKE ?1", [format!("%{}{name}", std::path::MAIN_SEPARATOR)], |r| r.get(0))
                 .unwrap()
         };
         assert_eq!(state_of("gone.txt"), "pending");
@@ -874,7 +874,10 @@ mod tests {
         check_model(&mut store, &fake, &opts, false, false).unwrap();
         sync(&mut store, std::slice::from_ref(&root), &opts, false).unwrap();
         let key = volume_key(root.join("vol-d/x.txt").to_str().unwrap());
-        run(&mut store, &mut fake, &NoOcr, &opts, None, None, &|| false, &mut |_| {}).unwrap();
+        // Enough threads that the late files waiting for the hang cannot occupy the whole pool and keep hang-1 from
+        // starting (CI runners have 3 cores).
+        let pool = rayon::ThreadPoolBuilder::new().num_threads(8).build().unwrap();
+        pool.install(|| run(&mut store, &mut fake, &NoOcr, &opts, None, None, &|| false, &mut |_| {})).unwrap();
         // At most one: on a slow machine the hung helper's (test) sleep may already have ended and released it.
         let hung_for_key = with_registry(|r| r.helpers.values().filter(|(k, h)| *h && *k == key).count());
         assert!(hung_for_key <= 1, "{hung_for_key} hung helpers for one drive");
@@ -1014,7 +1017,7 @@ mod tests {
     }
 
     fn id_of(store: &IndexStore, name: &str) -> i64 {
-        store.connection().query_row("SELECT id FROM files WHERE path LIKE ?1", [format!("%/{name}")], |r| r.get(0)).unwrap()
+        store.connection().query_row("SELECT id FROM files WHERE path LIKE ?1", [format!("%{}{name}", std::path::MAIN_SEPARATOR)], |r| r.get(0)).unwrap()
     }
 
     fn files_matching(store: &IndexStore, term: &str) -> Vec<i64> {
