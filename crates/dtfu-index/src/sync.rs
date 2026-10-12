@@ -193,13 +193,20 @@ fn check_root(store: &IndexStore, root: &Path, probe: Probe) -> Result<(Check, O
 
 const MTIME_TOLERANCE: f64 = 0.001;
 
-fn root_string(p: &Path) -> String {
+/// `root` followed by the platform's separator, for prefix matching that never catches a sibling ("/ab" for "/a").
+fn dir_prefix(root: &str) -> String {
+    if root.ends_with(['/', std::path::MAIN_SEPARATOR]) { root.to_string() } else { format!("{root}{}", std::path::MAIN_SEPARATOR) }
+}
+
+/// A folder as the index keys it: its text without trailing separators, except a filesystem root ("/", "C:\\")
+/// which keeps its own. Shared with the service and the engine so their keys match.
+pub fn root_string(p: &Path) -> String {
     let s = p.to_string_lossy().into_owned();
-    if s.len() > 1 && s.ends_with('/') {
-        s.trim_end_matches('/').to_string()
-    } else {
-        s
+    if p.parent().is_none() {
+        return s; // "/" or "C:\\": trimming would change what it names
     }
+    let t = s.trim_end_matches(['/', std::path::MAIN_SEPARATOR]);
+    if t.is_empty() { s } else { t.to_string() }
 }
 
 fn to_new_file(c: &Candidate) -> Result<NewFile> {
@@ -291,7 +298,7 @@ fn sync_with(store: &mut IndexStore, roots: &[PathBuf], opts: &IndexOptions, cod
             continue;
         }
         let rs = root_string(r);
-        let prefix = if rs.ends_with('/') { rs.clone() } else { format!("{rs}/") };
+        let prefix = dir_prefix(&rs);
         let mut under = existing.iter().filter(|row| row.path.starts_with(&prefix)).peekable();
         let known = under.peek().is_none() || under.any(|row| seen.contains(row.path.as_str()));
         if known {
@@ -354,7 +361,7 @@ fn sync_with(store: &mut IndexStore, roots: &[PathBuf], opts: &IndexOptions, cod
         .filter(|(_, &s)| s != RootState::Online)
         .map(|(r, _)| root_string(r))
         .chain(report.unreadable_dirs.iter().cloned())
-        .map(|r| if r.ends_with('/') { r } else { format!("{r}/") })
+        .map(|r| dir_prefix(&r))
         .collect();
     for row in &existing {
         if !seen.contains(row.path.as_str())

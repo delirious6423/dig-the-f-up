@@ -134,11 +134,11 @@ fn tool_candidates(name: &str, windows: bool) -> Vec<String> {
     }
 }
 
-/// Locate a tool via PATH, then the Homebrew prefixes.
+/// Locate a tool: first next to the running executable (the app bundles its own LGPL ffmpeg/ffprobe there, see
+/// scripts/build-ffmpeg.sh), then PATH, then the Homebrew prefixes.
 pub fn find_tool(name: &str) -> Option<PathBuf> {
-    let mut dirs: Vec<PathBuf> = std::env::var_os("PATH")
-        .map(|p| std::env::split_paths(&p).collect())
-        .unwrap_or_default();
+    let mut dirs: Vec<PathBuf> = std::env::current_exe().ok().and_then(|e| e.parent().map(Path::to_path_buf)).into_iter().collect();
+    dirs.extend(std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect::<Vec<_>>()).unwrap_or_default());
     dirs.push("/opt/homebrew/bin".into());
     dirs.push("/usr/local/bin".into());
     let names = tool_candidates(name, cfg!(windows));

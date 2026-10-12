@@ -10,3 +10,6 @@ baseline/
 /reference/
 /CLAUDE.local.md
 /.local/
+build-ffmpeg/
+/app/binaries/ffmpeg-*
+/app/binaries/ffprobe-*

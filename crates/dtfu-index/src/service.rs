@@ -174,7 +174,7 @@ pub struct Service {
 }
 
 fn root_strings(roots: &[PathBuf]) -> Vec<String> {
-    roots.iter().map(|r| r.to_string_lossy().trim_end_matches('/').to_string()).collect()
+    roots.iter().map(|r| crate::sync::root_string(r)).collect()
 }
 
 /// Roots that exist now (unplugged drives drop out); the store scope follows them.

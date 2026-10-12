@@ -737,13 +737,18 @@ fn name_texts(path: &str) -> (String, String) {
         Some(rest) => rest,
         None => parent.as_str(),
     };
-    let folder_words = folder.split('/').filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" ");
+    let folder_words = folder.split(['/', std::path::MAIN_SEPARATOR]).filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" ");
     (normalize(name), normalize(&folder_words))
 }
 
-/// `root` with a trailing `/`, so that prefix matching never catches a sibling such as `/ab` for `/a`.
+/// `root` with a trailing separator (the platform's: `\\` on Windows), so that prefix matching never catches a sibling
+/// such as `/ab` for `/a`.
 fn with_slash(root: &str) -> String {
-    if root.ends_with('/') { root.to_string() } else { format!("{root}/") }
+    if root.ends_with(['/', std::path::MAIN_SEPARATOR]) {
+        root.to_string()
+    } else {
+        format!("{root}{}", std::path::MAIN_SEPARATOR)
+    }
 }
 
 /// True when `child` is a folder strictly inside `parent`.

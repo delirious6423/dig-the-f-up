@@ -685,10 +685,9 @@ impl Engine {
         self.folders()
             .into_iter()
             .map(|f| {
-                // Same key as the sync's: the folder as text without a trailing '/' (except "/" itself).
-                let text = f.to_string_lossy();
-                let key = if text.len() > 1 { text.trim_end_matches('/') } else { &text };
-                let state = match states.get(key) {
+                // Same key as the sync's.
+                let key = dtfu_index::sync::root_string(&f);
+                let state = match states.get(key.as_str()) {
                     Some(RootState::Online) => "online",
                     Some(RootState::Offline) => "offline",
                     Some(RootState::DifferentDrive) => "different_drive",

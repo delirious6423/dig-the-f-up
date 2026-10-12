@@ -12,7 +12,7 @@
 //!
 //! ## Library lookup order
 //! 1. `$DTFU_PDFIUM_DIR`
-//! 2. the folder containing the running executable
+//! 2. `<exe folder>/../lib/Dig-the-f-up` (Linux packages), then the folder containing the running executable
 //! 3. the system library search path
 //!
 //! If none binds, every call returns `PdfError::Unsupported` naming `DTFU_PDFIUM_DIR`.
@@ -35,6 +35,8 @@ fn candidate_dirs() -> Vec<PathBuf> {
         .ok()
         .and_then(|e| e.parent().map(Path::to_path_buf))
     {
+        // Linux packages (deb, AppImage) put bundled resources in <prefix>/lib/<product name>, next to <prefix>/bin.
+        dirs.push(dir.join("../lib/Dig-the-f-up"));
         dirs.push(dir);
     }
     // No "./pdfium" relative to the working directory: a library found there could be planted by a folder the user opens.
