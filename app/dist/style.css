@@ -27,7 +27,8 @@ mark{background:var(--mark);color:inherit;border-radius:2px}
 .reveal{font-size:11px;padding:0 6px}
 .dim{color:var(--dim);padding:0 12px}
 footer{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:6px 12px;border-top:1px solid var(--line);color:var(--dim);font-size:12px}
-footer #statusText{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+footer #statusText{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+footer #idxBar{flex:none;width:160px;margin:0}
 progress{width:140px;vertical-align:middle;margin-left:8px}
 @media (max-width:480px){#results li{grid-template-columns:auto 1fr}.place{grid-column:1/-1}}
 .chips{display:flex;flex-wrap:wrap;gap:6px;padding:8px 12px;border-bottom:1px solid var(--line)}

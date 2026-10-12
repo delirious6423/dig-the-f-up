@@ -272,13 +272,48 @@
     $("dlBtn").hidden = downloading;
     $("cancelDl").hidden = !downloading;
     if (!modelPresent) { if (!downloading) $("statusText").textContent = "No model"; return; }
-    const s = status;
+    const s = status, pr = progress(), bar = $("idxBar");
     let t;
-    if (s.state === "indexing") t = `Indexing ${s.done}/${s.total} ${s.current || ""}`;
+    if ((s.state === "indexing" || s.state === "paused") && pr.left > 0) {
+      const eta = s.state === "indexing" ? etaText(pr.left) : "";
+      t = `${s.state === "paused" ? "Paused" : "Indexing"}: ${fmt(pr.finished)} of ${fmt(pr.total)} files (${pr.finished && !pr.pct ? "<1" : pr.pct}%)` +
+        (eta ? ` · ${eta}` : "") + (s.state === "indexing" && s.current ? ` · ${s.current}` : "");
+    } else if (s.state === "indexing") t = `Indexing ${s.current || ""}`;
     else if (s.state === "paused") t = "Paused";
     else if (s.state === "noModel") t = "No model";
     else t = `Idle ${vectors} vectors`;
+    bar.hidden = !((s.state === "indexing" || s.state === "paused") && pr.left > 0);
+    bar.max = pr.total || 1; bar.value = pr.finished;
     $("statusText").textContent = t;
+    $("statusText").title = t;
+  }
+
+  // Whole-index progress from the per-kind counts: everything not "pending" is finished (done, skipped or failed).
+  function progress() {
+    let total = 0, left = 0;
+    for (const st of Object.values((countsData && countsData.filesByKindState) || {}))
+      for (const [state, n] of Object.entries(st)) { total += n; if (state === "pending") left += n; }
+    const finished = total - left;
+    return { total, left, finished, pct: total ? Math.floor(finished * 100 / total) : 0 };
+  }
+  const fmt = (n) => n.toLocaleString();
+  // Time left from the finishing rate over the last few minutes; shown once there is enough to go on.
+  let samples = [];
+  function sampleProgress() {
+    const now = Date.now(), f = progress().finished;
+    if (status.state !== "indexing") { samples = []; return; }
+    samples.push([now, f]);
+    samples = samples.filter(([t]) => now - t <= 180000);
+  }
+  function etaText(left) {
+    if (samples.length < 2) return "";
+    const [t0, f0] = samples[0], [t1, f1] = samples[samples.length - 1];
+    if (t1 - t0 < 20000 || f1 <= f0) return "";
+    const secs = left / ((f1 - f0) / ((t1 - t0) / 1000));
+    if (secs < 90) return "about a minute left";
+    if (secs < 3600) return `about ${Math.round(secs / 60)} min left`;
+    if (secs < 172800) return `about ${Math.round(secs / 3600)} h left`;
+    return `about ${Math.round(secs / 86400)} days left`;
   }
   async function refreshStatus() {
     try {
@@ -289,6 +324,7 @@
       folderCount = (await invoke("folders")).length;
       liveData = await invoke("live").catch(() => null);
     } catch (e) { $("statusText").textContent = String(e); return; }
+    sampleProgress();
     renderStatus();
   }
   $("dlBtn").addEventListener("click", async () => {
