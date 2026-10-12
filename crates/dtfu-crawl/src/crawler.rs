@@ -11,7 +11,8 @@ use crate::types::FileKind;
 use std::collections::{HashMap, HashSet};
 use std::fs::Metadata;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 /// Directory extensions treated as macOS packages/bundles (`isPackage`): not descended, counted "app or bundle".
 /// Crawler.swift:68-71. A port decision: the OS database is replaced by this list.
@@ -19,6 +20,8 @@ pub const PACKAGE_EXTENSIONS: &[&str] = &[
     "app", "appex", "framework", "bundle", "plugin", "kext", "xpc", "photoslibrary", "musiclibrary", "tvlibrary",
     "imovielibrary", "fcpbundle", "xcodeproj", "xcworkspace", "playground", "rtfd", "pages", "numbers", "key",
     "sparsebundle", "dSYM", "xcarchive",
+    // Port additions: media-app libraries and VM bundles are opaque folders of generated files.
+    "logicx", "band", "photolibrary", "aplibrary", "lrdata", "theater", "vmwarevm", "pvm", "utm",
 ];
 
 /// Subset of Model.swift `IndexOptions` the crawl reads (Model.swift:37-69).
@@ -45,6 +48,11 @@ pub struct CrawlOptions {
     pub threads: usize,
     /// For the "~/Library" rule; defaults to $HOME (or %USERPROFILE%).
     pub home: String,
+    /// Cancel hook: once set, the walk ends early (checked per directory). The report is then partial and must not be
+    /// used to decide that files are gone.
+    pub stop: Option<Arc<AtomicBool>>,
+    /// Running count of files found so far, for progress display.
+    pub found: Option<Arc<AtomicUsize>>,
 }
 
 impl Default for CrawlOptions {
@@ -61,6 +69,8 @@ impl Default for CrawlOptions {
             secrets_everywhere: false,
             threads: 0,
             home: unixify(&std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).unwrap_or_default()),
+            stop: None,
+            found: None,
         }
     }
 }
@@ -159,6 +169,9 @@ fn crawl_inner(roots: &[String], options: &CrawlOptions) -> CrawlReport {
     let root_set: HashSet<String> = root_paths.iter().cloned().collect();
 
     for root in &root_paths {
+        if options.stop.as_ref().is_some_and(|s| s.load(Ordering::Relaxed)) {
+            break;
+        }
         // Crawler.swift:40-44. In code mode Swift enters git repos instead; see module docs.
         let root_path = PathBuf::from(root);
         if !options.code && rules::is_project_root(&root_path) {
@@ -255,6 +268,9 @@ fn is_package_dir(name: &str) -> bool {
 const CHUNK: usize = 512;
 
 fn walk_dir<'s>(ctx: &'s Ctx<'s>, dir: &Path, scope: &rayon::Scope<'s>, sink: &'s Mutex<Partial>) {
+    if ctx.opts.stop.as_ref().is_some_and(|s| s.load(Ordering::Relaxed)) {
+        return;
+    }
     let mut local = Partial::default();
     let rd = match std::fs::read_dir(dir) {
         Ok(rd) => rd,
@@ -266,16 +282,26 @@ fn walk_dir<'s>(ctx: &'s Ctx<'s>, dir: &Path, scope: &rayon::Scope<'s>, sink: &'
         }
     };
     let mut entries: Vec<(String, PathBuf, Option<std::fs::FileType>)> = Vec::new();
+    // Names hidden by Windows attributes: not walked, but still seen by the project-marker check.
+    let mut hidden_names: Vec<String> = Vec::new();
     for e in rd {
         match e {
-            Ok(e) => entries.push((e.file_name().to_string_lossy().into_owned(), e.path(), e.file_type().ok())),
+            Ok(e) => {
+                let name = e.file_name().to_string_lossy().into_owned();
+                if is_hidden_entry(&e) {
+                    hidden_names.push(name); // like the '.'-prefix skip, for Windows hidden/system files and folders
+                } else {
+                    entries.push((name, e.path(), e.file_type().ok()));
+                }
+            }
             // An entry that cannot be read means the listing is incomplete.
             Err(_) => local.unreadable_dirs.push(path_string(dir)),
         }
     }
 
     // Crawler.swift:56-67: this folder was entered; is it a code project? (same listing, no second readdir)
-    if !ctx.opts.code && rules::is_project_listing(entries.iter().map(|e| e.0.as_str())) {
+    if !ctx.opts.code && rules::is_project_listing(entries.iter().map(|e| e.0.as_str()).chain(hidden_names.iter().map(|s| s.as_str())))
+    {
         local.project_roots.push(path_string(dir));
     }
 
@@ -326,22 +352,33 @@ fn walk_dir<'s>(ctx: &'s Ctx<'s>, dir: &Path, scope: &rayon::Scope<'s>, sink: &'
             visit_file(ctx, name, path, &mut local);
         }
     }
+    if let Some(n) = &ctx.opts.found {
+        n.fetch_add(local.found.len(), Ordering::Relaxed);
+    }
     sink.lock().unwrap().merge(local);
 }
 
 /// Operating-system folders at the top of a drive, reached only when the whole disk is chosen as a folder. On macOS,
 /// /System/Volumes/Data is the data volume again, so walking /System would also index /Users a second time.
 #[cfg(target_os = "macos")]
-const SYSTEM_FOLDERS: &[&str] = &["/System", "/Library", "/private", "/usr", "/bin", "/sbin", "/cores", "/dev", "/opt"];
+const SYSTEM_FOLDERS: &[&str] =
+    &["/System", "/Library", "/private", "/usr", "/bin", "/sbin", "/cores", "/dev", "/opt", "/Volumes"]; // /Volumes: external drives, Time Machine
 #[cfg(all(unix, not(target_os = "macos")))]
 const SYSTEM_FOLDERS: &[&str] = &[
     "/proc", "/sys", "/dev", "/run", "/usr", "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/libx32", "/etc", "/var",
     "/boot", "/snap", "/tmp", "/opt", "/lost+found",
+    // Mounted drives and the Nix store: not the user's own files when "/" is chosen.
+    "/mnt", "/media", "/nix",
 ];
 /// Matched after the drive letter (`C:`), case-insensitively.
 #[cfg(windows)]
 const SYSTEM_FOLDERS: &[&str] =
     &["/Windows", "/Program Files", "/Program Files (x86)", "/ProgramData", "/$Recycle.Bin", "/System Volume Information"];
+
+/// The top-level OS folders [`system_folder_reason`] skips, as `/`-separated paths (after the drive letter on Windows).
+pub fn system_folders() -> &'static [&'static str] {
+    SYSTEM_FOLDERS
+}
 
 /// `p` is a `/`-separated path as built by [`path_string`].
 pub fn system_folder_reason(p: &str) -> Option<&'static str> {
@@ -400,14 +437,32 @@ fn visit_file(ctx: &Ctx, name: &str, path: &Path, out: &mut Partial) {
     out.found.push(Candidate { path: path_string(path), kind, size: md.len() as i64, mtime, inode, device });
 }
 
-/// Crawler.swift:85-87 SF_DATALESS (0x4000_0000) on macOS; nowhere else.
+/// Crawler.swift:85-87 SF_DATALESS (0x4000_0000) on macOS.
 #[cfg(target_os = "macos")]
 fn is_dataless(md: &Metadata) -> bool {
     use std::os::macos::fs::MetadataExt;
     md.st_flags() & 0x4000_0000 != 0
 }
-#[cfg(not(target_os = "macos"))]
+/// Windows cloud placeholders (OneDrive etc.): RECALL_ON_DATA_ACCESS 0x400000, RECALL_ON_OPEN 0x40000, OFFLINE 0x1000.
+#[cfg(windows)]
+fn is_dataless(md: &Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    md.file_attributes() & (0x40_0000 | 0x4_0000 | 0x1000) != 0
+}
+#[cfg(not(any(target_os = "macos", windows)))]
 fn is_dataless(_md: &Metadata) -> bool {
+    false
+}
+
+/// Windows FILE_ATTRIBUTE_HIDDEN 0x2 (DirEntry metadata is free there); false elsewhere. SYSTEM alone is not enough:
+/// Windows sets it on user folders with a custom icon.
+#[cfg(windows)]
+fn is_hidden_entry(e: &std::fs::DirEntry) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    e.metadata().is_ok_and(|m| m.file_attributes() & 0x2 != 0)
+}
+#[cfg(not(windows))]
+fn is_hidden_entry(_e: &std::fs::DirEntry) -> bool {
     false
 }
 

@@ -137,6 +137,9 @@ fn secrets_and_code_classification() {
     assert_eq!(classify_code(&p("id_rsa"), &o), Classification::Skip("key or password file"));
     assert_eq!(classify_code(&p("app.min.js"), &o), Classification::Skip("minified"));
     assert_eq!(classify_code(&p("LICENSE.md"), &o), Classification::Skip("license"));
+    for name in ["Cargo.lock", "yarn.lock", "package-lock.json", "pnpm-lock.yaml", "go.sum", "Package.resolved"] {
+        assert_eq!(classify_code(&p(name), &o), Classification::Skip("lockfile"), "{name}");
+    }
     assert_eq!(classify_code(&p("main.rs"), &o), Classification::Index(FileKind::Code));
     assert_eq!(classify_code(&p("Dockerfile.dev"), &o), Classification::Index(FileKind::Code));
     assert_eq!(classify_code(&p("data.json"), &o), Classification::Skip("data file"));
@@ -273,4 +276,66 @@ fn parallel_matches_serial_on_wide_tree() {
     let b = crawl(&[r], &CrawlOptions { threads: 4, ..Default::default() });
     assert_eq!(a.candidates.len(), 30 * 40 + 1200);
     assert_eq!(a.candidates, b.candidates);
+}
+
+#[test]
+fn home_app_data_and_old_mac_library_are_skipped() {
+    let home = "/home/me";
+    assert!(skip_reason_for_folder("/home/me/AppData", home, &[]).is_some());
+    assert!(skip_reason_for_folder("/home/me/snap", home, &[]).is_some());
+    assert!(skip_reason_for_folder("/home/me/Documents/snap", home, &[]).is_none());
+    assert!(skip_reason_for_folder("/Volumes/Old/Users/me/Library", home, &[]).is_some());
+    assert!(skip_reason_for_folder("/Volumes/Old/Library", home, &[]).is_none());
+    assert!(skip_reason_for_folder("/home/me/Library", "", &[]).is_none());
+}
+
+#[test]
+fn backup_folders_are_skipped() {
+    for n in ["Backups.backupdb", "WindowsImageBackup", "FileHistory", "$RECYCLE.BIN", "Windows.old", "$WINDOWS.~BT", "System Volume Information"] {
+        assert!(skip_reason_for_folder(&format!("/Volumes/X/{n}"), "/Users/me", &[]).is_some(), "{n}");
+    }
+    assert!(skip_reason_for_folder("/Volumes/TM/2024-01-01.inprogress", "/Users/me", &[]).is_some());
+    assert!(skip_reason_for_folder("/Volumes/TM/a.backup", "/Users/me", &[]).is_some());
+    assert!(skip_reason_for_folder("D:/x.previous", "/Users/me", &[]).is_some());
+    // Only directly under a volume root.
+    assert!(skip_reason_for_folder("/Users/me/Documents/old.backup", "/Users/me", &[]).is_none());
+    assert!(skip_reason_for_folder("/Volumes/TM/deep/old.previous", "/Users/me", &[]).is_none());
+}
+
+#[test]
+fn python_distributions_and_steam_are_skipped() {
+    for n in ["anaconda3", "miniconda3", "miniforge3", "steamapps"] {
+        assert_eq!(skip_reason_for_folder(&format!("/Users/me/{n}"), "/Users/me", &[]), Some("developer folder"));
+    }
+}
+
+#[test]
+fn media_libraries_and_vms_are_packages_and_not_walked() {
+    for ext in ["logicx", "band", "photolibrary", "aplibrary", "lrdata", "theater", "vmwarevm", "pvm", "utm", "photoslibrary"] {
+        assert!(dtfu_crawl::crawler::PACKAGE_EXTENSIONS.contains(&ext), "{ext}");
+    }
+    let d = TempDir::new().unwrap();
+    let pkg = d.path().join("Song.logicx");
+    fs::create_dir(&pkg).unwrap();
+    fs::write(pkg.join("a.txt"), "x").unwrap();
+    fs::write(d.path().join("b.txt"), "x").unwrap();
+    let r = crawl(&[d.path().to_path_buf()], &CrawlOptions::default());
+    assert_eq!(names(&r, d.path()), vec!["b.txt"]);
+}
+
+#[test]
+fn stop_flag_ends_the_walk_early_and_found_counts_files() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::Arc;
+    let d = TempDir::new().unwrap();
+    fs::create_dir(d.path().join("sub")).unwrap();
+    fs::write(d.path().join("sub/a.txt"), "a").unwrap();
+    fs::write(d.path().join("b.txt"), "b").unwrap();
+    let found = Arc::new(AtomicUsize::new(0));
+    let stop = Arc::new(AtomicBool::new(false));
+    let o = CrawlOptions { stop: Some(stop.clone()), found: Some(found.clone()), ..Default::default() };
+    assert_eq!(crawl(&[d.path()], &o).candidates.len(), 2);
+    assert_eq!(found.load(Ordering::SeqCst), 2);
+    stop.store(true, Ordering::SeqCst);
+    assert!(crawl(&[d.path()], &o).candidates.is_empty());
 }

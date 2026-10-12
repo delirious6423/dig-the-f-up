@@ -4,7 +4,7 @@
 
 use crate::options::IndexOptions;
 use crate::run::{self, check_model, finish_long_files};
-use crate::sync::{sync, SyncSummary};
+use crate::sync::{sync_with_progress, Stopped, SyncSummary};
 use crate::types::{Embed, Ocr};
 use anyhow::Result;
 use dtfu_core::{FileKind, SegmentKind};
@@ -59,6 +59,8 @@ fn lighton_backfill(store: &mut IndexStore, ocr: &dyn Ocr) -> Result<()> {
 pub enum ServiceEvent {
     /// `keep_only` removed this many rows outside the roots.
     Pruned { code: bool, removed: usize },
+    /// A sync is crawling or writing; `seen` files found so far. At most about once a second.
+    Syncing { seen: usize },
     Sync { code: bool, summary: SyncSummary },
     /// A file finished in a normal pass (main or code index).
     Progress(run::Event),
@@ -138,7 +140,8 @@ impl Control {
     fn take_code_sync(&self) -> bool {
         self.with(|f| std::mem::take(&mut f.code_sync))
     }
-    fn stopped(&self) -> bool {
+    /// True once `stop` was called.
+    pub fn stopped(&self) -> bool {
         self.read(|f| f.stop)
     }
     fn backfill_allowed(&self) -> bool {
@@ -243,8 +246,13 @@ impl Service {
         loop {
             if control.take_sync() {
                 let roots = available_roots(&mut self.main);
-                let summary = match sync(&mut self.main.store, &roots, &opts, false) {
+                let c = &control;
+                let summary = match sync_with_progress(&mut self.main.store, &roots, &opts, false, &|| c.stopped(), &mut |seen| {
+                    on_event(ServiceEvent::Syncing { seen })
+                }) {
                     Ok(s) => s,
+                    // Paused or quitting: not an error, and nothing was removed.
+                    Err(e) if e.downcast_ref::<Stopped>().is_some() => break,
                     Err(e) => {
                         on_event(ServiceEvent::Error(format!("sync failed: {e:#}")));
                         continue;
@@ -282,7 +290,7 @@ impl Service {
 
             if !new_files.is_empty() {
                 let c = &control;
-                run::run(&mut self.main.store, emb, ocr, &opts, None, Some(&new_files), &|| c.any_request(false), &mut |e| {
+                run::run_until(&mut self.main.store, emb, ocr, &opts, None, Some(&new_files), &|| c.any_request(false), &|| c.stopped(), &mut |e| {
                     on_event(ServiceEvent::Progress(e.clone()))
                 })?;
                 // Leftovers stay "new" only when the run was interrupted; otherwise they wait for the backfill gate.
@@ -293,7 +301,7 @@ impl Service {
             lighton_backfill(&mut self.main.store, ocr)?;
             if self.main.store.pending_count()? > 0 && control.backfill_allowed() {
                 let c = &control;
-                run::run(&mut self.main.store, emb, ocr, &opts, None, None, &|| c.any_request(false) || !c.backfill_allowed(), &mut |e| {
+                run::run_until(&mut self.main.store, emb, ocr, &opts, None, None, &|| c.any_request(false) || !c.backfill_allowed(), &|| c.stopped(), &mut |e| {
                     on_event(ServiceEvent::Progress(e.clone()))
                 })?;
                 if control.any_request(false) {
@@ -304,8 +312,12 @@ impl Service {
                 if self.main.store.pending_count()? == 0 || !control.backfill_allowed() {
                     if control.take_code_sync() {
                         let roots = available_roots(code);
-                        let summary = match sync(&mut code.store, &roots, &opts, true) {
+                        let c = &control;
+                        let summary = match sync_with_progress(&mut code.store, &roots, &opts, true, &|| c.stopped(), &mut |seen| {
+                            on_event(ServiceEvent::Syncing { seen })
+                        }) {
                             Ok(s) => s,
+                            Err(e) if e.downcast_ref::<Stopped>().is_some() => break,
                             Err(e) => {
                                 on_event(ServiceEvent::Error(format!("code sync failed: {e:#}")));
                                 continue;
@@ -322,13 +334,13 @@ impl Service {
                     }
                     let c = &control;
                     if !new_code.is_empty() {
-                        run::run(&mut code.store, emb, ocr, &opts, None, Some(&new_code), &|| c.any_request(has_code), &mut |e| {
+                        run::run_until(&mut code.store, emb, ocr, &opts, None, Some(&new_code), &|| c.any_request(has_code), &|| c.stopped(), &mut |e| {
                             on_event(ServiceEvent::Progress(e.clone()))
                         })?;
                         new_code = if c.any_request(has_code) { code.store.pending(None, Some(&new_code))?.into_iter().map(|f| f.id).collect() } else { Vec::new() };
                         continue;
                     } else if code.store.pending_count()? > 0 && control.backfill_allowed() {
-                        run::run(&mut code.store, emb, ocr, &opts, None, None, &|| c.any_request(has_code) || !c.backfill_allowed(), &mut |e| {
+                        run::run_until(&mut code.store, emb, ocr, &opts, None, None, &|| c.any_request(has_code) || !c.backfill_allowed(), &|| c.stopped(), &mut |e| {
                             on_event(ServiceEvent::Progress(e.clone()))
                         })?;
                         if control.any_request(has_code) {
@@ -446,6 +458,23 @@ mod tests {
         assert_eq!(progress(&events), 3, "{events:?}");
         assert!(matches!(events.last(), Some(ServiceEvent::Idle)));
         assert_eq!(svc.main().store.pending_count().unwrap(), 0);
+    }
+
+    #[test]
+    fn sync_reports_progress_and_a_stopped_sync_is_silent() {
+        let (mut svc, _c, root) = service("syncing", true, IndexOptions::default());
+        notes(&root, "a", 3);
+        let mut events = Vec::new();
+        svc.run(&mut fake, &NoOcr, None, &mut |e| events.push(e)).unwrap();
+        assert!(events.iter().any(|e| matches!(e, ServiceEvent::Syncing { seen: 3 })), "{events:?}");
+        let (mut svc, c, root) = service("stopsync", true, IndexOptions::default());
+        notes(&root, "a", 3);
+        c.stop();
+        let mut events = Vec::new();
+        svc.run(&mut fake, &NoOcr, None, &mut |e| events.push(e)).unwrap();
+        assert!(!events.iter().any(|e| matches!(e, ServiceEvent::Error(_) | ServiceEvent::Sync { .. })), "{events:?}");
+        assert!(matches!(events.last(), Some(ServiceEvent::Stopped)), "{events:?}");
+        assert_eq!(svc.main().store.files_under(&[crate::sync::root_string(&root)]).unwrap().len(), 0);
     }
 
     #[test]

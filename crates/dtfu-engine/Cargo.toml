@@ -8,6 +8,7 @@ rust-version.workspace = true
 [dependencies]
 anyhow = { workspace = true }
 dtfu-core = { workspace = true }
+dtfu-crawl = { path = "../dtfu-crawl" }
 dtfu-embed = { path = "../dtfu-embed" }
 dtfu-index = { path = "../dtfu-index" }
 dtfu-models = { path = "../dtfu-models" }

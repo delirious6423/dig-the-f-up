@@ -52,11 +52,19 @@ fn skipped(why: &str) -> Outcome {
 
 /// Embeds `prepared` and writes its segments and final state. `Err` only for store failures; a file that cannot be
 /// embedded or has nothing to index is recorded as failed or skipped and returns `Ok`.
-pub fn commit(
+#[cfg(test)]
+pub fn commit(store: &mut IndexStore, embedder: &mut dyn Embed, prepared: Prepared, opts: &IndexOptions) -> Result<()> {
+    commit_unless_stopped(store, embedder, prepared, opts, &|| false)
+}
+
+/// Like `commit`, but `should_stop` is asked between the windows of a long audio or video file; when it says stop,
+/// nothing is written and the row stays pending (never done with half the vectors).
+pub fn commit_unless_stopped(
     store: &mut IndexStore,
     embedder: &mut dyn Embed,
     prepared: Prepared,
     opts: &IndexOptions,
+    should_stop: &dyn Fn() -> bool,
 ) -> Result<()> {
     let id = prepared.job.file.id;
     let mut outcome = match prepared.result {
@@ -66,8 +74,9 @@ pub fn commit(
         Err(Leave::Failed(e)) => {
             Outcome { segments: Vec::new(), state: FileState::Failed, detail: Some(e), info: BTreeMap::new() }
         }
-        Ok(payload) => match build(embedder, payload, opts) {
+        Ok(payload) => match build(embedder, payload, opts, should_stop) {
             Ok(o) => o,
+            Err(e) if e.is::<Stopped>() => return Ok(()),
             Err(e) => Outcome {
                 segments: Vec::new(),
                 state: FileState::Failed,
@@ -123,7 +132,17 @@ pub fn commit(
 pub const CONTENT_HASH: &str = "content_hash";
 pub const CONTENT_SIZE: &str = "content_size";
 
-fn build(embedder: &mut dyn Embed, payload: Payload, opts: &IndexOptions) -> Result<Outcome> {
+/// The run was stopped while a file was being embedded.
+#[derive(Debug)]
+struct Stopped;
+impl std::fmt::Display for Stopped {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("stopped")
+    }
+}
+impl std::error::Error for Stopped {}
+
+fn build(embedder: &mut dyn Embed, payload: Payload, opts: &IndexOptions, should_stop: &dyn Fn() -> bool) -> Result<Outcome> {
     match payload {
         Payload::Image { kind, width, height, rgb, orig_width, orig_height, taken, ocr } => {
             let screenshot = kind == FileKind::Screenshot;
@@ -215,6 +234,9 @@ fn build(embedder: &mut dyn Embed, payload: Payload, opts: &IndexOptions) -> Res
         Payload::Audio { duration, windows } => {
             let mut segments = Vec::new();
             for window in windows {
+                if should_stop() {
+                    return Err(Stopped.into());
+                }
                 let window = window?;
                 let vector = check(embedder.embed_audio_samples(&window.samples)?)?;
                 segments.push(NewSegment {
@@ -320,6 +342,9 @@ fn build(embedder: &mut dyn Embed, payload: Payload, opts: &IndexOptions) -> Res
         Payload::Video { duration, frames, sound } => {
             let mut segments = Vec::new();
             for f in &frames {
+                if should_stop() {
+                    return Err(Stopped.into());
+                }
                 let v = check(embedder.embed_image_rgb(f.width as usize, f.height as usize, &f.rgb, opts.frame_budget)?)?;
                 segments.push(NewSegment {
                     kind: SegmentKind::Frame,
@@ -334,6 +359,9 @@ fn build(embedder: &mut dyn Embed, payload: Payload, opts: &IndexOptions) -> Res
             let mut sound_windows = 0usize;
             if let Some(windows) = sound {
                 for window in windows {
+                    if should_stop() {
+                        return Err(Stopped.into());
+                    }
                     let window = window?;
                     let vector = check(embedder.embed_audio_samples(&window.samples)?)?;
                     segments.push(NewSegment {
@@ -629,6 +657,22 @@ mod tests {
         assert_eq!(state(&store, rec.id), ("skipped".into(), Some("too small".into())));
         commit(&mut store, &mut fake, prepared(&rec, Err(Leave::Failed("boom".into()))), &opts).unwrap();
         assert_eq!(state(&store, rec.id), ("failed".into(), Some("boom".into())));
+    }
+
+    #[test]
+    fn stop_during_a_long_audio_file_leaves_it_pending() {
+        let (mut store, rec) = setup(FileKind::Audio);
+        let mut fake = FakeEmbedder::default();
+        let seen = std::cell::Cell::new(0);
+        let stop = || {
+            seen.set(seen.get() + 1);
+            seen.get() > 3
+        };
+        let p = prepared(&rec, Ok(Payload::Audio { duration: 1000.0, windows: windows(10) }));
+        commit_unless_stopped(&mut store, &mut fake, p, &IndexOptions::default(), &stop).unwrap();
+        assert_eq!(fake.audio.len(), 3);
+        assert_eq!(state(&store, rec.id).0, "pending");
+        assert!(rows(&store).is_empty());
     }
 
     #[test]

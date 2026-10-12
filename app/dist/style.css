@@ -1,11 +1,11 @@
-:root{color-scheme:light dark;--bg:#fff;--fg:#1d1d1f;--dim:#86868b;--line:#e5e5ea;--sel:#e8f0fe;--acc:#3b6ee6;--mark:#fff1a8}
+:root{color-scheme:light dark;--bg:#fff;--fg:#1d1d1f;--dim:#6b6b70;--line:#e5e5ea;--sel:#e8f0fe;--acc:#3b6ee6;--mark:#fff1a8}
 @media (prefers-color-scheme:dark){:root{--bg:#1e1e20;--fg:#f2f2f7;--dim:#98989f;--line:#38383c;--sel:#2b3a55;--mark:#6b5b00}}
 *{box-sizing:border-box}
 [hidden]{display:none!important}
 html,body{height:100%;margin:0}
 body{display:flex;flex-direction:column;background:var(--bg);color:var(--fg);font:14px -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif}
-header{display:flex;gap:8px;padding:12px;border-bottom:1px solid var(--line)}
-#q{flex:1;font:inherit;font-size:16px;padding:8px 12px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--fg);outline:none}
+header{display:flex;flex-wrap:wrap;gap:8px;padding:12px;border-bottom:1px solid var(--line)}
+#q{flex:1 1 200px;min-width:0;font:inherit;font-size:16px;padding:8px 12px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--fg);outline:none}
 #q:focus{border-color:var(--acc)}
 button{font:inherit;background:none;color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:4px 10px;cursor:pointer}
 button:hover{border-color:var(--acc)}
@@ -27,8 +27,9 @@ mark{background:var(--mark);color:inherit;border-radius:2px}
 .reveal{font-size:11px;padding:0 6px}
 .dim{color:var(--dim);padding:0 12px}
 footer{display:flex;justify-content:space-between;align-items:center;gap:8px;padding:6px 12px;border-top:1px solid var(--line);color:var(--dim);font-size:12px}
-footer #statusText{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-footer #idxBar{flex:none;width:160px;margin:0}
+footer #statusText{flex:1 1 0;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+footer #idxBar{flex:0 1 160px;min-width:48px;width:160px;margin:0}
+footer #dl{flex:none}
 progress{width:140px;vertical-align:middle;margin-left:8px}
 @media (max-width:480px){#results li{grid-template-columns:auto 1fr}.place{grid-column:1/-1}}
 .chips{display:flex;flex-wrap:wrap;gap:6px;padding:8px 12px;border-bottom:1px solid var(--line)}
@@ -73,3 +74,4 @@ progress{width:140px;vertical-align:middle;margin-left:8px}
 #folderList em{font-style:normal;font-size:12px;padding:0 6px}
 .warn{color:#b26a00}
 @media (prefers-color-scheme:dark){.warn{color:#f0b35a}}
+#empty button{margin-left:6px}

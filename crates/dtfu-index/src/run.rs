@@ -1,7 +1,7 @@
 //! The pipeline loop: prepare on all cores (rayon, bounded channel) while one thread embeds and commits.
 //! Port of Swift `Indexer.run` / `finishLongFiles` / `process` (Indexer.swift:139-260), with more prepare parallelism.
 
-use crate::commit::{commit, CONTENT_HASH, CONTENT_SIZE};
+use crate::commit::{commit_unless_stopped, CONTENT_HASH, CONTENT_SIZE};
 use crate::options::IndexOptions;
 use crate::prepare::prepare;
 use crate::sync::MTIME_TOLERANCE;
@@ -12,6 +12,7 @@ use rayon::prelude::*;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 use std::sync::mpsc::{sync_channel, RecvTimeoutError};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
@@ -73,14 +74,32 @@ pub fn run(
     should_stop: &dyn Fn() -> bool,
     on_event: &mut dyn FnMut(&Event),
 ) -> Result<BTreeMap<String, usize>> {
+    run_until(store, embedder, ocr, opts, limit, only, should_stop, should_stop, on_event)
+}
+
+/// [`run`] with two kinds of stop. `should_stop` (a sync request, pause, quit) ends the run between files;
+/// `hard_stop` (pause, quit) also abandons a long audio or video file mid-embedding. Keeping the two apart stops
+/// frequent sync requests in a busy folder from restarting a long file forever.
+#[allow(clippy::too_many_arguments)]
+pub fn run_until(
+    store: &mut IndexStore,
+    embedder: &mut dyn Embed,
+    ocr: &dyn Ocr,
+    opts: &IndexOptions,
+    limit: Option<usize>,
+    only: Option<&[i64]>,
+    should_stop: &dyn Fn() -> bool,
+    hard_stop: &dyn Fn() -> bool,
+    on_event: &mut dyn FnMut(&Event),
+) -> Result<BTreeMap<String, usize>> {
     let mut pending = store.pending(limit, only)?;
     prioritise(&mut pending, opts);
     let total = pending.len();
     if !opts.dedup_by_content {
         let jobs = pending.into_iter().map(|file| Job { file, step: None, content_hash: None }).collect();
-        return process(store, embedder, ocr, opts, jobs, (0, total), should_stop, on_event).map(|(states, _)| states);
+        return process(store, embedder, ocr, opts, jobs, (0, total), should_stop, hard_stop, on_event).map(|(states, _)| states);
     }
-    let plan = plan_duplicates(store, opts, pending)?;
+    let plan = plan_duplicates(store, opts, pending, should_stop)?;
     let mut states: BTreeMap<String, usize> = BTreeMap::new();
     let mut done = 0;
     let mut jobs = plan.jobs;
@@ -106,7 +125,7 @@ pub fn run(
             jobs.push(Job { file: copy.target, step: None, content_hash: Some(copy.hash) });
         }
     }
-    let (pass, n) = process(store, embedder, ocr, opts, jobs, (done, total), should_stop, on_event)?;
+    let (pass, n) = process(store, embedder, ocr, opts, jobs, (done, total), should_stop, hard_stop, on_event)?;
     merge_states(&mut states, pass);
     done = n;
     // Twins wait for their first copy to settle; if it did not finish, the twin is embedded itself.
@@ -138,7 +157,7 @@ pub fn run(
         }
     }
     if !rest.is_empty() {
-        let (pass, _) = process(store, embedder, ocr, opts, rest, (done, total), should_stop, on_event)?;
+        let (pass, _) = process(store, embedder, ocr, opts, rest, (done, total), should_stop, hard_stop, on_event)?;
         merge_states(&mut states, pass);
     }
     Ok(states)
@@ -170,7 +189,7 @@ pub fn finish_long_files(
         }
     }
     let total = jobs.len();
-    process(store, embedder, ocr, opts, jobs, (0, total), should_stop, on_event).map(|(states, _)| states)
+    process(store, embedder, ocr, opts, jobs, (0, total), should_stop, should_stop, on_event).map(|(states, _)| states)
 }
 
 /// A file whose bytes equal an indexed file: rows are copied from `source`.
@@ -200,7 +219,7 @@ struct Plan {
 /// Sorts the pending files into copies, twins and jobs. Hashing is limited to files that have a same-kind, same-size
 /// candidate (an indexed file or a pending peer), so a file with a unique size is never read twice. Code files and files
 /// above `dedup_max_bytes` are never hashed.
-fn plan_duplicates(store: &IndexStore, opts: &IndexOptions, pending: Vec<FileRecord>) -> Result<Plan> {
+fn plan_duplicates(store: &IndexStore, opts: &IndexOptions, pending: Vec<FileRecord>, should_stop: &dyn Fn() -> bool) -> Result<Plan> {
     let eligible = |f: &FileRecord| f.kind != dtfu_core::FileKind::Code && f.size >= 0 && (f.size as u64) <= opts.dedup_max_bytes;
     let mut peers: HashMap<(&'static str, i64), usize> = HashMap::new();
     for f in pending.iter().filter(|f| eligible(f)) {
@@ -216,6 +235,9 @@ fn plan_duplicates(store: &IndexStore, opts: &IndexOptions, pending: Vec<FileRec
     let mut plan = Plan::default();
     let mut primaries: HashMap<String, (i64, String)> = HashMap::new();
     for file in pending {
+        if should_stop() {
+            break; // the files not planned yet stay pending
+        }
         let key = (file.kind.as_str(), file.size);
         let candidates = indexed.get(&key);
         let has_peer = peers.get(&key).copied().unwrap_or(0) > 1;
@@ -297,6 +319,8 @@ pub const PREPARE_DEADLINE: Duration = Duration::from_secs(120);
 const OCR_ALLOWANCE: Duration = Duration::from_secs(15 * 60);
 /// Abandoned (still blocked) helper threads allowed at once; at this many the run stops preparing new files.
 const MAX_LEAKED: usize = 4;
+/// How often a waiting run checks for a stop (pause, quit, a new sync).
+const CANCEL_POLL: Duration = Duration::from_millis(250);
 
 /// The part of the path that names the drive or share: the first two normal components ("/Volumes/X").
 fn volume_key(path: &str) -> String {
@@ -347,14 +371,23 @@ thread_local! {
 }
 
 /// Waits for the helper's result. Time the helper spends in OCR is not counted, up to `OCR_ALLOWANCE`.
-fn wait_excluding_ocr<T>(rx: &std::sync::mpsc::Receiver<T>, deadline: Duration, clock: &OcrClock) -> Option<T> {
+/// Gives up (`None`) at the deadline, or within a quarter second once `cancel` is set.
+fn wait_excluding_ocr<T>(
+    rx: &std::sync::mpsc::Receiver<T>,
+    deadline: Duration,
+    clock: &OcrClock,
+    cancel: &AtomicBool,
+) -> Option<T> {
     let start = Instant::now();
     loop {
+        if cancel.load(Ordering::SeqCst) {
+            return None;
+        }
         let (spent, in_ocr) = clock.spent();
         let used = start.elapsed().saturating_sub(spent.min(OCR_ALLOWANCE));
         let left = deadline.checked_sub(used).filter(|d| !d.is_zero())?;
-        // While OCR runs, `left` does not shrink: wait in steps instead of spinning on a tiny remainder.
-        let step = if in_ocr { left.max(Duration::from_millis(250)) } else { left };
+        // Short steps, so `cancel` is seen; while OCR runs `left` does not shrink, so never spin on a tiny remainder.
+        let step = if in_ocr { CANCEL_POLL } else { left.min(CANCEL_POLL) };
         match rx.recv_timeout(step) {
             Ok(v) => return Some(v),
             Err(RecvTimeoutError::Disconnected) => return None,
@@ -363,10 +396,12 @@ fn wait_excluding_ocr<T>(rx: &std::sync::mpsc::Receiver<T>, deadline: Duration, 
     }
 }
 
-/// Lends the borrowed `Ocr` to helper threads that may outlive the run. Once the run is over `alive` is false and the
-/// pointer is never touched again (the write lock waits for calls in flight).
+/// What helper threads call for OCR. With an owned engine (`Ocr::shared`) the run never waits for them. A borrowed
+/// one is lent as a raw `'static` reference: once the run is over `alive` is false and it is never touched again
+/// (the write lock waits for calls in flight).
 struct OcrGate {
-    ocr: &'static dyn Ocr,
+    owned: Option<Arc<dyn Ocr + Send + Sync>>,
+    borrowed: Option<&'static dyn Ocr>,
     alive: RwLock<bool>,
 }
 impl Ocr for OcrGate {
@@ -375,9 +410,13 @@ impl Ocr for OcrGate {
         if let Some(c) = &clock {
             c.enter(); // before the lock: waiting for it is OCR time too
         }
-        let out = match self.alive.read() {
-            Ok(alive) if *alive => self.ocr.recognize(width, height, rgb),
-            _ => None,
+        let out = if let Some(ocr) = &self.owned {
+            ocr.recognize(width, height, rgb)
+        } else {
+            match (self.alive.read(), self.borrowed) {
+                (Ok(alive), Some(ocr)) if *alive => ocr.recognize(width, height, rgb),
+                _ => None,
+            }
         };
         if let Some(c) = &clock {
             c.leave();
@@ -388,7 +427,9 @@ impl Ocr for OcrGate {
 struct CloseGate(Arc<OcrGate>);
 impl Drop for CloseGate {
     fn drop(&mut self) {
-        *self.0.alive.write().unwrap_or_else(|e| e.into_inner()) = false;
+        if self.0.borrowed.is_some() {
+            *self.0.alive.write().unwrap_or_else(|e| e.into_inner()) = false;
+        }
     }
 }
 
@@ -449,6 +490,9 @@ struct Guard {
     deadline: Duration,
     opts: Arc<IndexOptions>,
     gate: Arc<OcrGate>,
+    /// Set when the run stops: files not started are skipped, and waits for files in progress end at once (their
+    /// helper threads finish in the background and their results are dropped, never committed).
+    cancel: AtomicBool,
 }
 
 impl Guard {
@@ -482,8 +526,14 @@ impl Guard {
         if spawned.is_err() {
             return unavailable("cannot start a reader thread".into()); // the closure (and its permit) is dropped
         }
-        match wait_excluding_ocr(&rx, self.deadline, &clock) {
+        match wait_excluding_ocr(&rx, self.deadline, &clock, &self.cancel) {
             Some(prepared) => prepared,
+            None if self.cancel.load(Ordering::SeqCst) => {
+                // Abandoned but possibly still running (ffmpeg, PDF rendering): it counts toward `MAX_LEAKED` and holds
+                // its volume until it finishes, so a quick Resume does not stack new work on top of it.
+                mark_hung(id);
+                unavailable("stopped".into())
+            }
             None => {
                 mark_hung(id); // no-op when the helper already finished
                 unavailable(format!("timed out reading {}", job.file.path))
@@ -525,6 +575,7 @@ fn process(
     jobs: Vec<Job>,
     progress: (usize, usize),
     should_stop: &dyn Fn() -> bool,
+    hard_stop: &dyn Fn() -> bool,
     on_event: &mut dyn FnMut(&Event),
 ) -> Result<(BTreeMap<String, usize>, usize)> {
     let (mut done, total) = progress;
@@ -532,11 +583,13 @@ fn process(
     let mut finished: HashSet<i64> = HashSet::new();
     let batch = (rayon::current_num_threads() * 2).max(4);
     let (tx, rx) = sync_channel::<Prepared>(batch);
+    let owned = ocr.shared();
     // SAFETY: the borrowed `ocr` is only reachable through `gate`, which `_close` shuts before this function returns.
-    let ocr_static: &'static dyn Ocr = unsafe { std::mem::transmute::<&dyn Ocr, &'static dyn Ocr>(ocr) };
-    let gate = Arc::new(OcrGate { ocr: ocr_static, alive: RwLock::new(true) });
+    let borrowed: Option<&'static dyn Ocr> =
+        if owned.is_some() { None } else { Some(unsafe { std::mem::transmute::<&dyn Ocr, &'static dyn Ocr>(ocr) }) };
+    let gate = Arc::new(OcrGate { owned, borrowed, alive: RwLock::new(true) });
     let _close = CloseGate(gate.clone());
-    let guard = Guard { deadline: deadline_for(&jobs), opts: Arc::new(opts.clone()), gate };
+    let guard = Guard { deadline: deadline_for(&jobs), opts: Arc::new(opts.clone()), gate, cancel: AtomicBool::new(false) };
     let mut outcome: Result<()> = Ok(());
     std::thread::scope(|scope| {
         let jobs_ref = &jobs;
@@ -547,7 +600,16 @@ fn process(
                 if hung_count() >= MAX_LEAKED {
                     return; // too many drives not answering: end the run, the rest stays pending
                 }
-                let prepared: Vec<Prepared> = chunk.par_iter().map(|job| guard.prepare(job)).collect();
+                let prepared: Vec<Prepared> = chunk
+                    .par_iter()
+                    .map(|job| {
+                        if guard.cancel.load(Ordering::SeqCst) {
+                            Prepared { job: job.clone(), result: Err(Leave::Unavailable("stopped".into())) }
+                        } else {
+                            guard.prepare(job)
+                        }
+                    })
+                    .collect();
                 for p in prepared {
                     if tx.send(p).is_err() {
                         return;
@@ -555,7 +617,13 @@ fn process(
                 }
             }
         });
-        for prepared in rx.iter() {
+        // Polls, so a stop is seen while a batch is still being prepared (a long video or OCR can take minutes).
+        loop {
+            let prepared = match rx.recv_timeout(CANCEL_POLL) {
+                Ok(p) => p,
+                Err(RecvTimeoutError::Timeout) if !should_stop() => continue,
+                Err(_) => break,
+            };
             if should_stop() {
                 break;
             }
@@ -566,7 +634,7 @@ fn process(
             }
             let started = Instant::now();
             let unavailable = matches!(prepared.result, Err(Leave::Unavailable(_)));
-            if let Err(e) = commit(store, embedder, prepared, opts) {
+            if let Err(e) = commit_unless_stopped(store, embedder, prepared, opts, hard_stop) {
                 outcome = Err(e);
                 break;
             }
@@ -577,6 +645,9 @@ fn process(
                     break;
                 }
             };
+            if state == "pending" && !unavailable && hard_stop() {
+                break; // stopped inside a long file: it stays pending, no event
+            }
             if state == "pending" || unavailable {
                 // Commit left the row alone (folder unavailable; a `partial` row stays `partial`): not settled, so it is
                 // retried in a later run. Its remaining steps are skipped for the rest of this run, and it is not
@@ -593,6 +664,7 @@ fn process(
             done += 1;
             on_event(&Event { done, total, path: file.path, kind: file.kind, state, note, seconds: started.elapsed().as_secs_f64() });
         }
+        guard.cancel.store(true, Ordering::SeqCst); // the producer stops preparing; nothing more is committed
         drop(rx);
     });
     outcome?;
@@ -824,7 +896,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(50));
             let _ = tx.send(7);
         });
-        assert_eq!(wait_excluding_ocr(&rx, Duration::from_millis(300), &clock), Some(7));
+        assert_eq!(wait_excluding_ocr(&rx, Duration::from_millis(300), &clock, &AtomicBool::new(false)), Some(7));
         assert!(clock.spent().0 >= Duration::from_millis(400), "{:?}", clock.spent());
     }
 
@@ -833,8 +905,24 @@ mod tests {
         let clock = OcrClock::default();
         let (_tx, rx) = std::sync::mpsc::channel::<u8>();
         let t = Instant::now();
-        assert_eq!(wait_excluding_ocr(&rx, Duration::from_millis(150), &clock), None);
+        assert_eq!(wait_excluding_ocr(&rx, Duration::from_millis(150), &clock, &AtomicBool::new(false)), None);
         assert!(t.elapsed() < Duration::from_millis(1000), "{:?}", t.elapsed());
+    }
+
+    #[test]
+    fn cancel_ends_the_wait_within_a_poll() {
+        let clock = Arc::new(OcrClock::default());
+        clock.enter(); // in OCR: the deadline alone would never end this wait
+        let (_tx, rx) = std::sync::mpsc::channel::<u8>();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let c = cancel.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            c.store(true, Ordering::SeqCst);
+        });
+        let t = Instant::now();
+        assert_eq!(wait_excluding_ocr(&rx, Duration::from_secs(60), &clock, &cancel), None);
+        assert!(t.elapsed() < Duration::from_secs(1), "{:?}", t.elapsed());
     }
 
     #[test]
@@ -861,6 +949,53 @@ mod tests {
         drop(a);
         assert!(admit("/vol-block-a").is_some());
         drop(healthy);
+    }
+
+    #[test]
+    fn stop_during_planning_leaves_files_pending() {
+        let (root, mut store, mut fake) = dedup_setup("plan-stop");
+        let opts = IndexOptions::default();
+        for n in ["a.txt", "b.txt", "c.txt"] {
+            std::fs::write(root.join(n), NOTE).unwrap();
+        }
+        sync(&mut store, std::slice::from_ref(&root), &opts, false).unwrap();
+        let pending = store.pending(None, None).unwrap();
+        let hashed = std::cell::Cell::new(0);
+        let plan = plan_duplicates(&store, &opts, pending.clone(), &|| {
+            hashed.set(hashed.get() + 1);
+            hashed.get() > 1
+        })
+        .unwrap();
+        assert_eq!(plan.jobs.len() + plan.copies.len() + plan.twins.len(), 1);
+        let states = run(&mut store, &mut fake, &NoOcr, &opts, None, None, &|| true, &mut |_| {}).unwrap();
+        assert!(states.is_empty(), "{states:?}");
+        assert_eq!(store.pending_count().unwrap(), pending.len());
+    }
+
+    /// An owned OCR engine whose calls block for 3 s.
+    struct SlowOcr;
+    impl Ocr for SlowOcr {
+        fn recognize(&self, _: usize, _: usize, _: &[u8]) -> Option<String> {
+            std::thread::sleep(Duration::from_secs(3));
+            None
+        }
+        fn shared(&self) -> Option<Arc<dyn Ocr + Send + Sync>> {
+            Some(Arc::new(SlowOcr))
+        }
+    }
+
+    #[test]
+    fn process_returns_promptly_while_ocr_blocks() {
+        let dir = temp("slow-ocr");
+        let path = dir.join("shot.png");
+        image::RgbImage::from_fn(600, 400, |x, y| image::Rgb([(x % 256) as u8, (y % 256) as u8, 128])).save(&path).unwrap();
+        let mut store = IndexStore::open(&temp("slow-ocr-store"), "index.sqlite").unwrap();
+        let mut fake = FakeEmbedder::default();
+        let job = Job { file: record(1, path.to_str().unwrap(), dtfu_core::FileKind::Screenshot), step: None, content_hash: None };
+        let t = Instant::now();
+        let stop = || t.elapsed() > Duration::from_millis(400);
+        process(&mut store, &mut fake, &SlowOcr, &IndexOptions::default(), vec![job], (0, 1), &stop, &stop, &mut |_| {}).unwrap();
+        assert!(t.elapsed() < Duration::from_secs(1), "{:?}", t.elapsed());
     }
 
     const NOTE: &str = "A short note about penguins and their habitat.";

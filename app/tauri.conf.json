@@ -14,6 +14,8 @@
         "title": "Dig-the-f-up",
         "width": 760,
         "height": 640,
+        "minWidth": 480,
+        "minHeight": 360,
         "resizable": true
       }
     ],

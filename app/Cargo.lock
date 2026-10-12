@@ -1165,6 +1165,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "dtfu-core",
+ "dtfu-crawl",
  "dtfu-embed",
  "dtfu-index",
  "dtfu-models",

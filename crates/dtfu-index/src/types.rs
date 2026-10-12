@@ -8,6 +8,7 @@ use dtfu_extract_text::docs::DocChunk;
 use dtfu_store::index::FileRecord;
 use std::ops::Range;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 /// The model, as the pipeline needs it. `dtfu_embed::Embedder` implements it (feature `llama`); tests use a fake.
 /// All vectors are L2-normalised, 768 floats.
@@ -26,6 +27,11 @@ pub trait Embed {
 pub trait Ocr: Sync {
     /// `rgb` is packed RGB8. `None` means no text found or OCR unavailable.
     fn recognize(&self, width: usize, height: usize, rgb: &[u8]) -> Option<String>;
+    /// An owned handle to the same engine, if it has no borrowed state. A run uses it so helper threads stuck in
+    /// `recognize` never delay the run's return; without it the run waits for calls in flight when it ends.
+    fn shared(&self) -> Option<Arc<dyn Ocr + Send + Sync>> {
+        None
+    }
     /// Whether text can be read now (false while an engine's model files are still missing).
     fn ready(&self) -> bool {
         true
@@ -40,6 +46,9 @@ pub trait Ocr: Sync {
 /// elsewhere, `ocrs` until LightOn's models are downloaded.
 pub struct SystemOcr;
 impl Ocr for SystemOcr {
+    fn shared(&self) -> Option<Arc<dyn Ocr + Send + Sync>> {
+        Some(Arc::new(SystemOcr))
+    }
     fn recognize(&self, width: usize, height: usize, rgb: &[u8]) -> Option<String> {
         dtfu_ocr::recognize_rgb(width, height, rgb)
     }
@@ -54,6 +63,9 @@ impl Ocr for SystemOcr {
 /// No OCR: screenshots are embedded as pictures only.
 pub struct NoOcr;
 impl Ocr for NoOcr {
+    fn shared(&self) -> Option<Arc<dyn Ocr + Send + Sync>> {
+        Some(Arc::new(NoOcr))
+    }
     fn recognize(&self, _: usize, _: usize, _: &[u8]) -> Option<String> {
         None
     }

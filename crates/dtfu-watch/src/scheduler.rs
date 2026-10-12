@@ -56,6 +56,8 @@ pub struct WatchConfig {
     pub power_poll: Duration,
     /// Roots indexed as code projects. Paths under these use the code lane and its noise list.
     pub code_roots: Vec<PathBuf>,
+    /// Paths whose events are dropped, with everything under them (the index folder, app data, OS folders).
+    pub ignored: Vec<PathBuf>,
     /// How often root availability is probed (default 10 s).
     pub availability_interval: Duration,
     /// Longest a single availability or volume probe may take before the root counts as offline (default 3 s).
@@ -75,6 +77,7 @@ impl Default for WatchConfig {
             resync_interval: crate::DEFAULT_RESYNC_INTERVAL,
             power_poll: Duration::from_secs(30),
             code_roots: Vec::new(),
+            ignored: Vec::new(),
             availability_interval: Duration::from_secs(10),
             probe_timeout: Duration::from_secs(3),
             network_resync_interval: Duration::from_secs(900),
@@ -157,7 +160,7 @@ impl Scheduler {
 
     /// Records one changed path. Paths outside every root, and noise paths, are dropped here.
     pub fn on_path(&mut self, path: &Path, now: Duration) {
-        if let Some(lane) = classify(path, &self.roots, &self.cfg.code_roots) {
+        if let Some(lane) = classify(path, &self.roots, &self.cfg.code_roots, &self.cfg.ignored) {
             self.coalescer.record(path.to_path_buf(), lane, now);
         }
     }
@@ -291,7 +294,10 @@ impl Scheduler {
 }
 
 /// Which lane a path belongs to, or `None` if it should be ignored. Code roots win over main roots.
-pub(crate) fn classify(path: &Path, roots: &[PathBuf], code_roots: &[PathBuf]) -> Option<Lane> {
+pub(crate) fn classify(path: &Path, roots: &[PathBuf], code_roots: &[PathBuf], ignored: &[PathBuf]) -> Option<Lane> {
+    if ignored.iter().any(|p| path.starts_with(p)) {
+        return None;
+    }
     if let Some(rel) = relative_under(path, code_roots) {
         return (!is_noise(rel, CODE_NOISE_FOLDERS)).then_some(Lane::Code);
     }
@@ -344,28 +350,51 @@ mod tests {
     #[test]
     fn noise_folders_and_hidden_paths_are_ignored() {
         let (r, c) = roots();
+        let none: &[PathBuf] = &[];
         assert_eq!(
-            classify(Path::new("/w/main/node_modules/x.js"), &r, &c),
+            classify(Path::new("/w/main/node_modules/x.js"), &r, &c, none),
             None
         );
-        assert_eq!(classify(Path::new("/w/main/.git/config"), &r, &c), None);
-        assert_eq!(classify(Path::new("/w/main/.DS_Store"), &r, &c), None);
-        assert_eq!(classify(Path::new("/w/code/target/debug/a"), &r, &c), None);
-        assert_eq!(classify(Path::new("/w/code/vendor/lib.go"), &r, &c), None);
-        assert_eq!(classify(Path::new("/elsewhere/a.txt"), &r, &c), None);
+        assert_eq!(classify(Path::new("/w/main/.git/config"), &r, &c, none), None);
+        assert_eq!(classify(Path::new("/w/main/.DS_Store"), &r, &c, none), None);
+        assert_eq!(classify(Path::new("/w/code/target/debug/a"), &r, &c, none), None);
+        assert_eq!(classify(Path::new("/w/code/vendor/lib.go"), &r, &c, none), None);
+        assert_eq!(classify(Path::new("/elsewhere/a.txt"), &r, &c, none), None);
         // Main index does index build/ and target/ documents; only code projects skip them.
         assert_eq!(
-            classify(Path::new("/w/main/build/report.pdf"), &r, &c),
+            classify(Path::new("/w/main/build/report.pdf"), &r, &c, none),
             Some(Lane::Main)
         );
         assert_eq!(
-            classify(Path::new("/w/main/notes/a.md"), &r, &c),
+            classify(Path::new("/w/main/notes/a.md"), &r, &c, none),
             Some(Lane::Main)
         );
         assert_eq!(
-            classify(Path::new("/w/code/src/main.rs"), &r, &c),
+            classify(Path::new("/w/code/src/main.rs"), &r, &c, none),
             Some(Lane::Code)
         );
+    }
+
+    #[test]
+    fn events_under_ignored_prefixes_are_dropped() {
+        // Non-hidden names, so only the ignore list can drop these events.
+        let (r, c) = (vec![PathBuf::from("/home/u")], Vec::new());
+        let ign = vec![PathBuf::from("/home/u/DigUp/index"), PathBuf::from("/home/u/Library")];
+        let idx = Path::new("/home/u/DigUp/index/main.sqlite-wal");
+        assert_eq!(classify(idx, &r, &c, &[]), Some(Lane::Main), "control: not dropped without the list");
+        assert_eq!(classify(idx, &r, &c, &ign), None);
+        assert_eq!(classify(Path::new("/home/u/Library/Application Support/x"), &r, &c, &ign), None);
+        // A sibling that only shares a string prefix is not under the ignored folder.
+        assert_eq!(classify(Path::new("/home/u/DigUp/index2/a.txt"), &r, &c, &ign), Some(Lane::Main));
+        assert_eq!(classify(Path::new("/home/u/LibraryNotes/a.md"), &r, &c, &ign), Some(Lane::Main));
+        assert_eq!(classify(Path::new("/home/u/docs/a.md"), &r, &c, &ign), Some(Lane::Main));
+    }
+
+    #[test]
+    fn normal_file_under_root_is_main_lane() {
+        let (r, c) = (vec![PathBuf::from("/home/u")], Vec::new());
+        let ign = vec![PathBuf::from("/home/u/.dtfu")];
+        assert_eq!(classify(Path::new("/home/u/notes/a.md"), &r, &c, &ign), Some(Lane::Main));
     }
 
     #[test]

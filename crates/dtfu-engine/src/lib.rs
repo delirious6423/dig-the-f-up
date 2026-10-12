@@ -72,10 +72,14 @@ pub enum EngineEvent {
         offline: Vec<String>,
         different_drive: Vec<String>,
     },
+    /// A folder sync is running; `seen` files found so far (about once a second).
+    Syncing { seen: usize },
     Progress { done: usize, total: usize, path: String, kind: String, state: String, note: Option<String> },
     /// A step of a long file in the later pass.
     Rest { done: usize, total: usize, path: String, kind: String, state: String, note: Option<String> },
     Waiting,
+    /// Something the user should know that is not a failure (indexing waits for another process).
+    Notice(String),
     Error(String),
     Idle,
     Stopped,
@@ -206,6 +210,37 @@ pub struct Engine {
     inner: Arc<Inner>,
 }
 
+/// Paths the watcher ignores: the index folder (each commit rewrites it and would re-trigger a sync), the
+/// app data folder (`~/Library`, `%USERPROFILE%\AppData`) and OS folders at the top of each root's drive.
+/// A folder that contains a root is never ignored: that would silence the whole root (e.g. `/private` on macOS
+/// holds temp dirs).
+fn watch_ignored(index_dir: &Path, roots: &[PathBuf]) -> Vec<PathBuf> {
+    let canon = |p: PathBuf| std::fs::canonicalize(&p).unwrap_or(p);
+    let mut out = vec![canon(index_dir.to_path_buf())];
+    let mut candidates = Vec::new();
+    if let Some(home) = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }) {
+        let home = PathBuf::from(home);
+        if cfg!(target_os = "macos") {
+            candidates.push(canon(home.join("Library")));
+        } else if cfg!(windows) {
+            candidates.push(canon(home.join("AppData")));
+        }
+    }
+    // Top-level OS folders of each root's drive, from the crawler's list (no disk access: a root may be a slow share).
+    for root in roots {
+        let Some(fs_root) = root.ancestors().last() else { continue };
+        for s in dtfu_crawl::crawler::system_folders() {
+            candidates.push(fs_root.join(s.trim_start_matches('/')));
+        }
+    }
+    // A root under an ignored folder keeps it watched, by either spelling (/var/folders is /private/var/folders on macOS).
+    let real_roots: Vec<PathBuf> = roots.iter().map(|r| canon(r.clone())).collect();
+    out.extend(candidates.into_iter().filter(|p| !roots.iter().chain(&real_roots).any(|r| r.starts_with(p))));
+    out.sort();
+    out.dedup();
+    out
+}
+
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
@@ -260,6 +295,7 @@ impl Inner {
     fn handle(&self, ev: ServiceEvent) {
         let ee = match ev {
             ServiceEvent::Pruned { removed, .. } => EngineEvent::Pruned { removed },
+            ServiceEvent::Syncing { seen } => EngineEvent::Syncing { seen },
             ServiceEvent::Sync { summary, code } => {
                 let pick = |want: RootState| -> Vec<String> {
                     summary.roots.iter().filter(|r| r.state == want).map(|r| r.root.clone()).collect()
@@ -326,6 +362,26 @@ impl Inner {
         *slot = Some(
             std::thread::Builder::new().name("dtfu-indexing".into()).spawn(move || {
                 let result = (|| -> Result<()> {
+                    // Another process (the CLI's `dtfu index`) may be indexing this folder; wait for it to finish
+                    // instead of writing alongside it. Searching is unaffected.
+                    let mut told = false;
+                    let _indexer = loop {
+                        if control.stopped() {
+                            return Ok(());
+                        }
+                        match dtfu_store::lock::IndexerLock::try_acquire(&dir)? {
+                            Some(l) => break l,
+                            None => {
+                                if !told {
+                                    told = true;
+                                    let msg = "Another Dig-the-f-up process (the dtfu command line) is indexing this index; waiting for it to finish.";
+                                    eprintln!("dtfu: {msg}");
+                                    me.emit(EngineEvent::Notice(msg.into()));
+                                }
+                                std::thread::sleep(Duration::from_secs(2));
+                            }
+                        }
+                    };
                     let store = IndexStore::open(&dir, MAIN_FILE)?;
                     let main = Part { store, roots, code: false, keep_only: true };
                     let opts = IndexOptions { priority, ..IndexOptions::default() };
@@ -379,7 +435,11 @@ impl Inner {
         if !enabled || roots.is_empty() {
             return;
         }
-        let cfg = dtfu_watch::WatchConfig { policy: policy.power_policy(), ..Default::default() };
+        let cfg = dtfu_watch::WatchConfig {
+            policy: policy.power_policy(),
+            ignored: watch_ignored(&self.cfg.index_dir, &roots),
+            ..Default::default()
+        };
         let sink = Arc::new(EngineSink(Arc::downgrade(self)));
         match dtfu_watch::Watcher::start(
             &roots,
@@ -400,8 +460,10 @@ impl Inner {
     }
 
     fn halt(&self) {
-        let mut slot = lock(&self.thread);
-        if let Some(h) = slot.take() {
+        // Take the handle out and release the lock before joining, so a start or resume that comes in meanwhile
+        // is not blocked behind a long wind-down.
+        let handle = lock(&self.thread).take();
+        if let Some(h) = handle {
             lock(&self.control).stop();
             let _ = h.join();
         }

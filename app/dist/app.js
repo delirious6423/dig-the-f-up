@@ -5,7 +5,9 @@
   const $ = (id) => document.getElementById(id);
   const isMac = /Mac/.test(navigator.platform);
   let hits = [], sel = -1, timer = null, seq = 0, modelPresent = true, downloading = false;
-  let status = { state: "idle" }, vectors = 0;
+  let status = { state: "idle" };
+  let syncText = "", ocrText = "", adding = false, shortcutShown = false;
+  let modelTotal = 0, fileDone = {}, fileTotal = {}, verifying = false;
   let folderCount = null, countsData = null, suggestions = [], liveData = null;
 
   function esc(s) {
@@ -74,18 +76,22 @@
   $("kinds").addEventListener("click", (ev) => {
     const b = ev.target.closest("button"); if (!b) return;
     const k = b.dataset.kind;
-    if (k === "") kindSel = [];
-    else kindSel = kindSel.includes(k) ? kindSel.filter((x) => x !== k) : [...kindSel, k];
+    setKinds(k === "" ? [] : kindSel.includes(k) ? kindSel.filter((x) => x !== k) : [...kindSel, k]);
+  });
+  function setKinds(list) {
+    kindSel = list;
     try { localStorage.setItem(KIND_KEY, JSON.stringify(kindSel)); } catch (e) { /* storage unavailable */ }
     paintChips();
     doSearch();
-  });
+  }
+  $("empty").addEventListener("click", (ev) => { if (ev.target.closest("#clearKinds")) setKinds([]); });
   paintChips();
 
   async function doSearch() {
     const q = $("q").value.trim();
     const my = ++seq;
     if (!q) { hits = []; sel = -1; render(); $("empty").textContent = ""; return; }
+    if (!modelPresent) { hits = []; sel = -1; render(); $("empty").textContent = "Download the search model first"; return; }
     try {
       const r = await invoke("search", { query: q, limit: 30, kinds: kindSel.length ? kindSel : null });
       if (my !== seq) return;
@@ -94,7 +100,8 @@
       if (!r.length && folderCount !== 0) {
         const c = await invoke("counts").catch(() => null);
         if (my !== seq) return;
-        $("empty").textContent = c && c.pending > 0 ? `Still indexing ${c.pending} files; results will improve` : "No results.";
+        if (kindSel.length) $("empty").innerHTML = 'No results in the selected types. <button id="clearKinds">Show all</button>';
+        else $("empty").textContent = c && c.pending > 0 ? `Still indexing ${c.pending} files; results will improve` : "No results.";
       }
     } catch (e) {
       if (my !== seq) return;
@@ -112,10 +119,18 @@
     if (ev.target.closest(".reveal") || ev.metaKey || ev.ctrlKey) reveal(h); else open(h);
   });
   document.addEventListener("keydown", (ev) => {
-    if (ev.key === "Escape") { ev.preventDefault(); T.window.getCurrentWindow().hide(); }
-    else if (ev.key === "ArrowDown" && hits.length) { ev.preventDefault(); sel = Math.min(hits.length - 1, sel + 1); render(); }
+    if (ev.key === "Escape") {
+      if (ev.target.tagName === "SELECT") return;
+      if ($("q").value) { ev.preventDefault(); clearTimeout(timer); timer = null; $("q").value = ""; doSearch(); $("q").focus(); }
+      else if (isMac) { ev.preventDefault(); T.window.getCurrentWindow().hide(); }
+      return;
+    }
+    // Arrows and Enter belong to the search box and the result list only; buttons and selects keep their own keys.
+    if (ev.target !== $("q") && !$("results").contains(ev.target)) return;
+    if (ev.key === "ArrowDown" && hits.length) { ev.preventDefault(); sel = Math.min(hits.length - 1, sel + 1); render(); }
     else if (ev.key === "ArrowUp" && hits.length) { ev.preventDefault(); sel = Math.max(0, sel - 1); render(); }
     else if (ev.key === "Enter") {
+      if (ev.target.tagName === "BUTTON") return;
       ev.preventDefault();
       if (ev.target === $("q") && timer) { clearTimeout(timer); timer = null; doSearch().then(() => {}); return; }
       if (sel >= 0) (ev.metaKey || ev.ctrlKey ? reveal : open)(hits[sel]);
@@ -133,39 +148,51 @@
     $("folderList").innerHTML = fs.map((f, i) =>
       `<li data-i="${i}"><span>${esc(f.path)}</span> ${note[f.state] || ""}<button data-rm="1">Remove</button></li>`).join("") || '<li class="dim">No folders yet.</li>';
     $("folderList").querySelectorAll("button").forEach((b) => b.addEventListener("click", async () => {
-      const path = fs[+b.closest("li").dataset.i].path;
+      if (b.disabled) return;
+      const path = fs[+b.closest("li").dataset.i].path, use = !!b.dataset.use, label = b.textContent;
+      b.disabled = true; b.textContent = use ? "Switching…" : "Removing…";
       try {
-        if (b.dataset.use) await invoke("use_drive_now", { path });
-        else await invoke("remove_folder", { path });
+        if (use) await invoke("use_drive_now", { path });
+        else if (await invoke("ask", { message: `Stop searching "${path}"? Your files are not deleted.`, ok: "Remove" })) await invoke("remove_folder", { path });
       } catch (e) { showError(e); }
+      b.disabled = false; b.textContent = label;
       loadFolders(); refreshStatus();
     }));
   }
   $("gear").addEventListener("click", () => { const p = $("folders"); p.hidden = !p.hidden; if (!p.hidden) loadFolders(); });
-  // Add one folder (already chosen), start indexing when the model is present, then refresh the panels.
-  async function addFolderPath(p) {
+  // Choose (or take) one folder, add it, start indexing when the model is present. One add at a time.
+  const addBtns = () => [$("addFolder"), $("welcomeAdd"), ...$("welcomeChoices").querySelectorAll("button")];
+  async function addFlow(btn, getPath) {
+    if (adding) return;
+    adding = true;
+    const label = btn.textContent;
+    addBtns().forEach((b) => { b.disabled = true; });
+    btn.textContent = "Adding…";
     try {
-      await invoke("add_folder", { path: p });
-      if (modelPresent) await invoke("start_indexing");
-      $("welcome").hidden = true;
+      const p = await getPath();
+      if (p) {
+        await invoke("add_folder", { path: p });
+        if (modelPresent) await invoke("start_indexing");
+      }
     } catch (e) { showError(e); }
+    adding = false;
+    addBtns().forEach((b) => { b.disabled = false; });
+    btn.textContent = label;
     loadFolders(); refreshStatus();
   }
-  async function pickAndAdd() {
-    try {
-      const p = await invoke("pick_folder");
-      if (p) await addFolderPath(p);
-    } catch (e) { showError(e); }
-  }
+  const pickAndAdd = (ev) => addFlow(ev.currentTarget, () => invoke("pick_folder"));
   $("addFolder").addEventListener("click", pickAndAdd);
   $("welcomeAdd").addEventListener("click", pickAndAdd);
   $("welcomeChoices").addEventListener("click", (ev) => {
     const b = ev.target.closest("button"); if (!b) return;
-    addFolderPath(suggestions[+b.dataset.i]);
+    addFlow(b, async () => suggestions[+b.dataset.i]);
   });
   $("welcomeDl").addEventListener("click", () => $("dlBtn").click());
   $("pauseBtn").addEventListener("click", async () => {
-    try { await invoke(status.state === "paused" ? "resume" : "pause"); } catch (e) { showError(e); }
+    const b = $("pauseBtn"), resuming = status.state === "paused";
+    b.disabled = true; b.textContent = resuming ? "Resuming…" : "Pausing…";
+    try { await invoke(resuming ? "resume" : "pause"); } catch (e) { showError(e); }
+    b.disabled = false;
     refreshStatus();
   });
 
@@ -176,22 +203,33 @@
       `<button data-i="${i}" title="${esc(p)}">${esc(p.split(/[\\/]/).pop())}</button>`).join("");
   }
 
-  // Per-kind counts, e.g. "image 120 done, 3 pending".
+  // Per-kind counts in plain words, e.g. "Images: 120 indexed, 3 waiting".
+  const KIND_WORD = { screenshot: "Screenshots", image: "Images", pdf: "PDFs", doc: "Documents", audio: "Audio", video: "Videos" };
+  const STATE_WORD = { done: "indexed", pending: "waiting", skipped: "skipped", failed: "could not be read", partial: "partly indexed", unavailable: "unavailable" };
   function countsHtml() {
     if (!countsData) return "";
     const kinds = Object.entries(countsData.filesByKindState || {});
     if (!kinds.length) return "<div>Nothing indexed yet.</div>";
     return kinds.map(([kind, st]) =>
-      `<div>${esc(kind)} ${Object.entries(st).map(([s, n]) => `${esc(n)} ${esc(s)}`).join(", ")}</div>`).join("");
+      `<div>${esc(KIND_WORD[kind] || kind)}: ${Object.entries(st).map(([s, n]) => `${fmt(n)} ${esc(STATE_WORD[s] || s)}`).join(", ")}</div>`).join("");
+  }
+  // Files that can be found by search: fully or partly indexed.
+  function searchable() {
+    let n = 0;
+    for (const st of Object.values((countsData && countsData.filesByKindState) || {})) n += (st.done || 0) + (st.partial || 0);
+    return n;
   }
 
   // Welcome panel, index controls. Called from renderStatus, so it follows every status change.
   function renderControls() {
-    $("welcome").hidden = folderCount !== 0;
-    $("welcomeStep").hidden = modelPresent;
+    // Stay visible until the model is there, so the download prompt cannot disappear.
+    $("welcome").hidden = folderCount === null || (folderCount > 0 && modelPresent);
+    $("welcomeStep").hidden = modelPresent || folderCount > 0;
+    $("welcomeHave").hidden = modelPresent || !(folderCount > 0);
+    $("welcomeChoices").hidden = $("welcomeAdd").parentElement.hidden = folderCount > 0;
     $("welcomeDl").hidden = modelPresent || downloading;
-    $("pauseBtn").hidden = !(modelPresent && folderCount > 0);
-    $("pauseBtn").textContent = status.state === "paused" ? "Resume" : "Pause";
+    $("pauseBtn").hidden = !(modelPresent && folderCount > 0 && (status.state === "indexing" || status.state === "paused" || syncText));
+    if (!$("pauseBtn").disabled) $("pauseBtn").textContent = status.state === "paused" ? "Resume" : "Pause";
     $("indexCounts").innerHTML = countsHtml();
   }
 
@@ -238,12 +276,12 @@
   $("watchPolicy").addEventListener("change", saveWatch);
   $("usageOn").addEventListener("change", async () => {
     const on = $("usageOn").checked;
-    if (!on && !confirm("Turn off and delete the history of files you opened?")) { $("usageOn").checked = true; return; }
+    if (!on && !(await invoke("ask", { message: "Turn off and delete the history of files you opened?", ok: "Turn off" }).catch(() => false))) { $("usageOn").checked = true; return; }
     try { liveData = await invoke("set_usage_tracking", { on }); } catch (e) { showError(e); }
     renderLive();
   });
   $("clearUsage").addEventListener("click", async () => {
-    if (!confirm("Delete the history of files you opened?")) return;
+    if (!(await invoke("ask", { message: "Delete the history of files you opened?", ok: "Delete" }).catch(() => false))) return;
     try { await invoke("clear_usage"); } catch (e) { showError(e); }
   });
 
@@ -260,6 +298,7 @@
 
   // Model size comes from the pinned manifest in the app, not hard-coded here.
   invoke("model_info").then((m) => {
+    modelTotal = m.totalBytes || 0;
     const label = `${Math.round(m.totalBytes / 1e6)} MB`;
     document.querySelectorAll(".modelSize").forEach((el) => { el.textContent = label; });
   }).catch(() => {});
@@ -271,17 +310,21 @@
     $("dl").hidden = modelPresent;
     $("dlBtn").hidden = downloading;
     $("cancelDl").hidden = !downloading;
-    if (!modelPresent) { if (!downloading) $("statusText").textContent = "No model"; return; }
+    if (!modelPresent) { if (!downloading) $("statusText").textContent = "Search model not downloaded"; return; }
     const s = status, pr = progress(), bar = $("idxBar");
     let t;
-    if ((s.state === "indexing" || s.state === "paused") && pr.left > 0) {
+    if (syncText && s.state !== "paused") t = syncText;
+    else if ((s.state === "indexing" || s.state === "paused") && pr.left > 0) {
       const eta = s.state === "indexing" ? etaText(pr.left) : "";
       t = `${s.state === "paused" ? "Paused" : "Indexing"}: ${fmt(pr.finished)} of ${fmt(pr.total)} files (${pr.finished && !pr.pct ? "<1" : pr.pct}%)` +
         (eta ? ` · ${eta}` : "") + (s.state === "indexing" && s.current ? ` · ${s.current}` : "");
     } else if (s.state === "indexing") t = `Indexing ${s.current || ""}`;
     else if (s.state === "paused") t = "Paused";
-    else if (s.state === "noModel") t = "No model";
-    else t = `Idle ${vectors} vectors`;
+    else if (s.state === "waiting") t = "Waiting for the search model…";
+    else if (s.state === "noModel") t = "Search model not downloaded";
+    else if (ocrText) t = ocrText;
+    else if (folderCount === 0) t = "Add a folder to start";
+    else { const n = searchable(); t = `Ready · ${fmt(n)} ${n === 1 ? "file" : "files"} searchable`; }
     bar.hidden = !((s.state === "indexing" || s.state === "paused") && pr.left > 0);
     bar.max = pr.total || 1; bar.value = pr.finished;
     $("statusText").textContent = t;
@@ -315,20 +358,22 @@
     if (secs < 172800) return `about ${Math.round(secs / 3600)} h left`;
     return `about ${Math.round(secs / 86400)} days left`;
   }
+  // Each call fails on its own; a failed one keeps the last good value.
   async function refreshStatus() {
-    try {
-      modelPresent = await invoke("model_present");
-      status = await invoke("status");
-      countsData = await invoke("counts");
-      vectors = countsData.vectors;
-      folderCount = (await invoke("folders")).length;
-      liveData = await invoke("live").catch(() => null);
-    } catch (e) { $("statusText").textContent = String(e); return; }
+    let failed = 0;
+    const keep = async (cmd, old) => { try { return await invoke(cmd); } catch (e) { failed++; return old; } };
+    modelPresent = await keep("model_present", modelPresent);
+    status = await keep("status", status);
+    countsData = await keep("counts", countsData);
+    const fs = await keep("folders", null);
+    if (fs) folderCount = fs.length;
+    liveData = await keep("live", liveData);
+    if (failed === 5) { $("statusText").textContent = "Can't reach the search engine. Trying again…"; return; }
     sampleProgress();
     renderStatus();
   }
   $("dlBtn").addEventListener("click", async () => {
-    downloading = true; $("dlBar").hidden = false; $("dlBar").value = 0; $("cancelDl").hidden = false; renderStatus();
+    downloading = true; resetDl(); $("dlBar").hidden = false; $("dlBar").value = 0; $("cancelDl").hidden = false; renderStatus();
     dismissBanner();
     $("statusText").textContent = "Downloading…";
     try { await invoke("download_models"); } catch (e) { finishDownload(); showError(e); renderStatus(); }
@@ -338,27 +383,67 @@
     $("cancelDl").disabled = true; $("statusText").textContent = "Cancelling…";
     try { await invoke("cancel_download"); } catch (e) { showError(e); }
   });
-  function finishDownload() { downloading = false; $("dlBar").hidden = true; $("cancelDl").hidden = true; $("cancelDl").disabled = false; }
+  function resetDl() { fileDone = {}; fileTotal = {}; verifying = false; }
+  function finishDownload() { resetDl(); downloading = false; $("dlBar").hidden = true; $("cancelDl").hidden = true; $("cancelDl").disabled = false; }
   listen("model-cancelled", (ev) => { finishDownload(); showNotice(ev.payload); refreshStatus(); });
 
+  const sum = (o) => Object.values(o).reduce((a, b) => a + b, 0);
+  const mb = (n) => Math.round(n / 1048576);
+  // One bar for the whole model: bytes done across files, total from the manifest (or the files seen so far).
   listen("model-progress", (ev) => {
     const p = ev.payload;
-    $("dlBar").max = p.total || 1; $("dlBar").value = p.done;
-    $("statusText").textContent = `Downloading ${p.name} ${Math.round(p.done / 1048576)}/${Math.round(p.total / 1048576)} MB`;
+    fileDone[p.name] = p.done; fileTotal[p.name] = p.total;
+    const done = sum(fileDone), total = modelTotal || sum(fileTotal);
+    verifying = p.total > 0 && p.done >= p.total;
+    $("dlBar").max = total || 1; $("dlBar").value = done;
+    $("statusText").textContent = verifying ? "Verifying…" : `Downloading the search model… ${mb(done)}/${mb(total)} MB`;
   });
   listen("model-ready", () => { finishDownload(); dismissBanner(); refreshStatus(); });
   listen("model-error", (ev) => { finishDownload(); showError("Download failed: " + ev.payload); renderStatus(); });
-  let evTimer = null;
+  // Combined over the files of the download, like the model download.
+  let ocrFiles = {};
+  listen("ocr-progress", (ev) => {
+    const p = ev.payload;
+    ocrFiles[p.name] = p;
+    const all = Object.values(ocrFiles), done = all.reduce((a, f) => a + f.done, 0), total = all.reduce((a, f) => a + f.total, 0);
+    ocrText = `Downloading text reader… ${mb(done)}/${mb(total)} MB`;
+    renderStatus();
+  });
+  listen("ocr-ready", () => { ocrText = ""; renderStatus(); });
+  listen("ocr-done", () => { ocrText = ""; ocrFiles = {}; renderStatus(); });
+  listen("ocr-error", (ev) => { ocrText = ""; showError("Text reader download failed: " + ev.payload); renderStatus(); });
+  listen("shortcut-error", (ev) => { if (!shortcutShown) { shortcutShown = true; showNotice(ev.payload); } });
+
+  // Folders from a "synced" event that cannot be reached, as a short list for a notice.
+  const names = (v) => [].concat(v || []).map((x) => (x && x.path) || x).join(", ");
+  let evTimer = null, lastAway = "", engineNotice = false;
   listen("engine-event", (ev) => {
     const p = ev.payload;
+    if (p.type === "syncing") syncText = `Scanning folders… ${fmt(p.seen || 0)} files found`;
+    else syncText = "";
     if (p.type === "progress" || p.type === "rest") status = { state: "indexing", done: p.done, total: p.total, current: (p.path || "").split(/[\\/]/).pop() };
     else if (p.type === "idle" || p.type === "stopped") { status = { state: "idle" }; if (p.type === "stopped") setTimeout(refreshStatus, 100); }
-    else if (p.type === "error") { $("statusText").textContent = "Error: " + p.message; return; }
+    else if (p.type === "waiting") status = { state: "waiting" };
+    else if (p.type === "error") { status = { state: "idle" }; showError(p.message); }
+    else if (p.type === "notice") { showNotice(p.message); engineNotice = true; }
+    else if (p.type === "synced") {
+      // Only when the set of unreachable folders changes, not on every resync.
+      const off = names(p.offline), diff = names(p.different_drive), away = off + "|" + diff;
+      if (away !== lastAway) {
+        lastAway = away;
+        if (off) showNotice(`Could not reach: ${off}. Its files stay searchable and are checked again when it is back.`);
+        if (diff) showNotice(`A different drive is mounted at: ${diff}. Open Folders and settings to choose whether to use it.`);
+      }
+    }
+    // An engine notice (waiting for another process) ends once indexing moves.
+    if (engineNotice && (p.type === "syncing" || p.type === "progress" || p.type === "synced")) { engineNotice = false; dismissBanner(); }
     renderStatus();
     if (p.type === "synced" && !$("folders").hidden) loadFolders();
     if (p.type === "idle" || p.type === "synced") { clearTimeout(evTimer); evTimer = setTimeout(refreshStatus, 300); }
   });
 
+  // The shortcut may have failed before this page was listening.
+  invoke("shortcut_error").then((m) => { if (m && !shortcutShown) { shortcutShown = true; showNotice(m); } }).catch(() => {});
   loadSuggestions();
   refreshStatus();
   setInterval(() => { if (!downloading) refreshStatus(); }, 5000);

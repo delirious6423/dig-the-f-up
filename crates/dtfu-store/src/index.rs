@@ -34,6 +34,16 @@ pub struct NewFile {
     pub device: u64,
 }
 
+/// One change of a sync, for [`IndexStore::apply_sync_ops`].
+#[derive(Debug)]
+pub enum SyncOp<'a> {
+    Insert(&'a NewFile),
+    /// The file changed on disk: drop what was extracted and queue it again with the new stat fields.
+    Requeue(i64, &'a NewFile),
+    Move(i64, &'a str),
+    Delete(i64),
+}
+
 /// One extracted piece of a file (a page, a chunk, a frame, the OCR text...).
 #[derive(Debug, Clone, PartialEq)]
 pub struct NewSegment {
@@ -357,6 +367,45 @@ impl IndexStore {
         delete_file_rows(&tx, id)?;
         tx.commit()?;
         Ok(())
+    }
+
+    /// Applies many sync changes in ONE transaction (a batch of a few thousand is much faster than one commit per
+    /// file, and a stop can fall between batches). Returns the ids of the inserted files, in order.
+    pub fn apply_sync_ops(&mut self, ops: &[SyncOp<'_>]) -> Result<Vec<i64>> {
+        let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut inserted = Vec::new();
+        for op in ops {
+            match op {
+                SyncOp::Insert(file) => {
+                    tx.prepare_cached(
+                        "INSERT INTO files(path, kind, size, mtime, inode, device) VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
+                    )?
+                    .execute(params![file.path, file.kind.as_str(), file.size, file.mtime, file.inode as i64, file.device as i64])?;
+                    let id = tx.last_insert_rowid();
+                    insert_name_row(&tx, id, &file.path)?;
+                    inserted.push(id);
+                }
+                SyncOp::Requeue(id, f) => {
+                    delete_segments(&tx, *id, true)?;
+                    tx.prepare_cached(
+                        "UPDATE files SET kind = ?1, size = ?2, mtime = ?3, inode = ?4, device = ?5, state = 'pending', \
+                         detail = NULL, info = NULL, indexed_at = NULL WHERE id = ?6",
+                    )?
+                    .execute(params![f.kind.as_str(), f.size, f.mtime, f.inode as i64, f.device as i64, id])?;
+                }
+                SyncOp::Move(id, new_path) => {
+                    tx.prepare_cached("UPDATE files SET path = ?1 WHERE id = ?2")?.execute(params![new_path, id])?;
+                    let (name, body) = name_texts(new_path);
+                    tx.prepare_cached(
+                        "UPDATE fts SET name = ?1, body = ?2 WHERE rowid IN (SELECT id FROM segments WHERE file = ?3 AND kind = 'name')",
+                    )?
+                    .execute(params![name, body, id])?;
+                }
+                SyncOp::Delete(id) => delete_file_rows(&tx, *id)?,
+            }
+        }
+        tx.commit()?;
+        Ok(inserted)
     }
 
     /// Removes every file not under one of `keep_roots` (folders taken out of the index). Returns how many went.

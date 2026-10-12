@@ -12,3 +12,6 @@ rusqlite.workspace = true
 dtfu-core.workspace = true
 dtfu-text = { path = "../dtfu-text" }
 serde_json = "1"
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -9,7 +9,7 @@ anyhow = { workspace = true }
 dirs = "6"
 libc = "0.2"
 sha2 = "0.10"
-ureq = "2"
+ureq = { version = "2", features = ["proxy-from-env"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }

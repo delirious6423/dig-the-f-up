@@ -3,18 +3,39 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::RecvTimeoutError;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use dtfu_core::FileKind;
 use dtfu_crawl::volume::{volume_info, VolumeInfo};
 use dtfu_crawl::{crawl, Candidate, CrawlOptions, CrawlReport};
-use dtfu_store::index::{IndexStore, NewFile};
+use dtfu_store::index::{IndexStore, NewFile, SyncOp};
 
 use crate::options::IndexOptions;
+
+/// Returned (as an `anyhow` error) when the stop signal ended a sync early. Nothing was removed because of it: rows
+/// written before the stop stay, and no row is deleted for a file the interrupted crawl did not get to see.
+#[derive(Debug)]
+pub struct Stopped;
+
+impl std::fmt::Display for Stopped {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "the sync was stopped")
+    }
+}
+impl std::error::Error for Stopped {}
+
+/// Rows written per transaction.
+const BATCH: usize = 1000;
+/// Longest gap between two progress reports.
+const PROGRESS_EVERY: Duration = Duration::from_secs(1);
+/// How often a running crawl looks at the stop signal.
+const STOP_POLL: Duration = Duration::from_millis(200);
+/// How long a stopped crawl may take to wind down before it is abandoned.
+const STOP_GRACE: Duration = Duration::from_secs(3);
 
 /// What a sync did.
 #[derive(Debug, Default, Clone)]
@@ -116,32 +137,65 @@ const CRAWL_DEADLINE: Duration = Duration::from_secs(2 * 3600);
 /// Crawls on a helper thread. Every [`CRAWL_WATCH`] the online roots are probed again; when one stops answering, is now
 /// a different volume, or [`CRAWL_DEADLINE`] passes, the crawl is abandoned (a blocked filesystem call can't be
 /// cancelled) and `None` is returned.
-fn watched_crawl(roots: &[(PathBuf, VolumeInfo)], copts: &CrawlOptions, probe: Probe) -> Option<CrawlReport> {
-    let started = std::time::Instant::now();
+fn watched_crawl(
+    roots: &[(PathBuf, VolumeInfo)],
+    copts: &CrawlOptions,
+    probe: Probe,
+    stop: &dyn Fn() -> bool,
+    progress: &mut dyn FnMut(usize),
+) -> Result<Option<CrawlReport>> {
+    let started = Instant::now();
     let (tx, rx) = std::sync::mpsc::channel();
     let (r, o) = (roots.iter().map(|(p, _)| p.clone()).collect::<Vec<_>>(), copts.clone());
     let done = Arc::new(AtomicBool::new(false));
     let flag = Arc::clone(&done);
-    std::thread::Builder::new()
+    let cancel = copts.stop.clone().unwrap_or_default();
+    let found = copts.found.clone().unwrap_or_default();
+    if std::thread::Builder::new()
         .name("dtfu-crawl".into())
         .spawn(move || {
             let report = crawl(&r, &o);
             flag.store(true, Ordering::SeqCst);
             let _ = tx.send(report);
         })
-        .ok()?;
+        .is_err()
+    {
+        return Ok(None);
+    }
+    let (mut last_watch, mut last_progress) = (Instant::now(), Instant::now());
     loop {
-        match rx.recv_timeout(CRAWL_WATCH) {
-            Ok(report) => return Some(report),
-            Err(RecvTimeoutError::Disconnected) => return None,
+        let wait = if cancel.load(Ordering::SeqCst) { STOP_GRACE } else { STOP_POLL };
+        match rx.recv_timeout(wait) {
+            Ok(report) => {
+                // A stopped crawl is partial: never hand it back as if it were the whole listing.
+                return if cancel.load(Ordering::SeqCst) { Err(Stopped.into()) } else { Ok(Some(report)) };
+            }
+            Err(RecvTimeoutError::Disconnected) => return Ok(None),
             Err(RecvTimeoutError::Timeout) => {
+                if cancel.load(Ordering::SeqCst) {
+                    // Asked to stop and still blocked in a filesystem call: leave the thread behind.
+                    *ABANDONED.lock().unwrap_or_else(|e| e.into_inner()) = Some(done);
+                    return Err(Stopped.into());
+                }
+                if stop() {
+                    cancel.store(true, Ordering::SeqCst);
+                    continue;
+                }
+                if last_progress.elapsed() >= PROGRESS_EVERY {
+                    last_progress = Instant::now();
+                    progress(found.load(Ordering::Relaxed));
+                }
+                if last_watch.elapsed() < CRAWL_WATCH {
+                    continue;
+                }
+                last_watch = Instant::now();
                 // Gone, not answering, or a different volume now (a drive swapped mid-crawl): the listing can't be
                 // trusted.
                 let changed = roots.iter().any(|(r, v)| probe(r).map(|now| now.id) != Some(v.id.clone()));
                 if changed || started.elapsed() > CRAWL_DEADLINE {
                     // The thread stays blocked; remember it until it returns.
                     *ABANDONED.lock().unwrap_or_else(|e| e.into_inner()) = Some(done);
-                    return None;
+                    return Ok(None);
                 }
             }
         }
@@ -223,11 +277,36 @@ fn to_new_file(c: &Candidate) -> Result<NewFile> {
 /// that is unreadable, not answering, on a different volume than last time, or that changes volume or becomes
 /// unreadable during the crawl keeps all its rows, and so does every folder the crawl could not list.
 pub fn sync(store: &mut IndexStore, roots: &[PathBuf], opts: &IndexOptions, code: bool) -> Result<SyncSummary> {
-    sync_with(store, roots, opts, code, &real_probe)
+    sync_with_progress(store, roots, opts, code, &|| false, &mut |_| {})
 }
 
-fn sync_with(store: &mut IndexStore, roots: &[PathBuf], opts: &IndexOptions, code: bool, probe: Probe) -> Result<SyncSummary> {
+/// [`sync`] that can be stopped and reports progress. `stop` is polled (about five times a second while crawling,
+/// between batches while writing); once it returns true the sync ends with a [`Stopped`] error. Rows already written
+/// stay, and nothing is deleted for files the interrupted crawl did not see. `progress(seen)` is called at most about
+/// once a second with the number of files found so far.
+pub fn sync_with_progress(
+    store: &mut IndexStore,
+    roots: &[PathBuf],
+    opts: &IndexOptions,
+    code: bool,
+    stop: &dyn Fn() -> bool,
+    progress: &mut dyn FnMut(usize),
+) -> Result<SyncSummary> {
+    sync_with(store, roots, opts, code, &real_probe, stop, progress)
+}
+
+fn sync_with(
+    store: &mut IndexStore,
+    roots: &[PathBuf],
+    opts: &IndexOptions,
+    code: bool,
+    probe: Probe,
+    stop: &dyn Fn() -> bool,
+    progress: &mut dyn FnMut(usize),
+) -> Result<SyncSummary> {
     let copts = CrawlOptions {
+        stop: Some(Arc::new(AtomicBool::new(false))),
+        found: Some(Arc::new(AtomicUsize::new(0))),
         code,
         include_code: opts.include_code,
         include_datasets: opts.include_datasets,
@@ -259,8 +338,11 @@ fn sync_with(store: &mut IndexStore, roots: &[PathBuf], opts: &IndexOptions, cod
     } else if crawl_stuck() {
         None
     } else {
-        watched_crawl(&online, &copts, probe)
+        watched_crawl(&online, &copts, probe, stop, progress)?
     };
+    if stop() {
+        return Err(Stopped.into());
+    }
     let report = crawled.unwrap_or_else(|| {
         // Nothing was (fully) crawled: every root keeps its rows this time.
         states.iter_mut().for_each(|s| *s = RootState::Offline);
@@ -277,6 +359,7 @@ fn sync_with(store: &mut IndexStore, roots: &[PathBuf], opts: &IndexOptions, cod
             states[i] = RootState::Offline;
         }
     }
+    progress(report.candidates.len());
     let root_strings: Vec<String> = roots.iter().map(|r| root_string(r)).collect();
     let existing = store.files_under(&root_strings)?;
 
@@ -318,44 +401,65 @@ fn sync_with(store: &mut IndexStore, roots: &[PathBuf], opts: &IndexOptions, cod
         ..Default::default()
     };
 
-    for c in &report.candidates {
-        let file = to_new_file(c)?;
-        if let Some(&i) = by_path.get(c.path.as_str()) {
-            let row = &existing[i];
-            if row.size != file.size || (row.mtime - file.mtime).abs() > MTIME_TOLERANCE || row.kind != file.kind {
-                store.requeue(row.id, Some(&file))?;
-                summary.changed += 1;
-                summary.queued.push(row.id);
-            } else {
-                summary.unchanged += 1;
-            }
-            continue;
+    let mut last_progress = Instant::now();
+    let total = report.candidates.len();
+    for chunk in report.candidates.chunks(BATCH) {
+        if stop() {
+            return Err(Stopped.into());
         }
-        let moved = if c.inode != 0 {
-            by_inode.get(&(c.device, c.inode)).map(|&i| &existing[i]).filter(|row| {
-                !seen.contains(row.path.as_str())
-                    && !moved_from.contains(row.path.as_str())
-                    && row.size == file.size
-                    && (row.mtime - file.mtime).abs() < MTIME_TOLERANCE
-            })
-        } else {
-            None
-        };
-        if let Some(row) = moved {
-            store.move_file(row.id, &file.path)?;
-            moved_from.insert(row.path.as_str());
-            summary.moved += 1;
-        } else {
-            let id = store.insert_file(&file, &[])?;
-            summary.queued.push(id);
-            summary.added += 1;
+        let files: Vec<NewFile> = chunk.iter().map(to_new_file).collect::<Result<_>>()?;
+        // None: an added file, whose id comes from the batch.
+        let mut slots: Vec<Option<i64>> = Vec::new();
+        let mut ops: Vec<SyncOp> = Vec::with_capacity(chunk.len());
+        for (c, file) in chunk.iter().zip(&files) {
+            if let Some(&i) = by_path.get(c.path.as_str()) {
+                let row = &existing[i];
+                if row.size != file.size || (row.mtime - file.mtime).abs() > MTIME_TOLERANCE || row.kind != file.kind {
+                    ops.push(SyncOp::Requeue(row.id, file));
+                    summary.changed += 1;
+                    slots.push(Some(row.id));
+                } else {
+                    summary.unchanged += 1;
+                }
+                continue;
+            }
+            let moved = if c.inode != 0 {
+                by_inode.get(&(c.device, c.inode)).map(|&i| &existing[i]).filter(|row| {
+                    !seen.contains(row.path.as_str())
+                        && !moved_from.contains(row.path.as_str())
+                        && row.size == file.size
+                        && (row.mtime - file.mtime).abs() < MTIME_TOLERANCE
+                })
+            } else {
+                None
+            };
+            if let Some(row) = moved {
+                ops.push(SyncOp::Move(row.id, &file.path));
+                moved_from.insert(row.path.as_str());
+                summary.moved += 1;
+            } else {
+                ops.push(SyncOp::Insert(file));
+                slots.push(None);
+                summary.added += 1;
+            }
+        }
+        let mut inserted = store.apply_sync_ops(&ops)?.into_iter();
+        for slot in slots {
+            summary.queued.push(match slot {
+                Some(id) => id,
+                None => inserted.next().ok_or_else(|| anyhow::anyhow!("batch returned too few ids"))?,
+            });
+        }
+        if last_progress.elapsed() >= PROGRESS_EVERY {
+            last_progress = Instant::now();
+            progress(total);
         }
     }
 
     // A root that went away (a drive ejected) or can't be read looks empty: keep its rows rather than take that for
     // "deleted". Its prefix is in `vanished`, so rows under it survive even when it is nested in a readable root. The
     // same goes for any folder the crawl could not list.
-    let vanished: Vec<String> = roots
+    let mut vanished: Vec<String> = roots
         .iter()
         .zip(&states)
         .filter(|(_, &s)| s != RootState::Online)
@@ -363,14 +467,33 @@ fn sync_with(store: &mut IndexStore, roots: &[PathBuf], opts: &IndexOptions, cod
         .chain(report.unreadable_dirs.iter().cloned())
         .map(|r| dir_prefix(&r))
         .collect();
-    for row in &existing {
-        if !seen.contains(row.path.as_str())
-            && !moved_from.contains(row.path.as_str())
-            && !vanished.iter().any(|v| row.path.starts_with(v.as_str()))
-        {
-            store.delete_file(row.id)?;
-            summary.removed += 1;
+    // Sorted and prefix-free, so one binary search finds the only prefix that can match a path.
+    vanished.sort();
+    vanished.dedup();
+    let mut kept: Vec<String> = Vec::with_capacity(vanished.len());
+    for v in vanished {
+        if !kept.last().is_some_and(|k| v.starts_with(k.as_str())) {
+            kept.push(v);
         }
+    }
+    let is_vanished = |path: &str| {
+        let i = kept.partition_point(|v| v.as_str() <= path);
+        i > 0 && path.starts_with(kept[i - 1].as_str())
+    };
+    let gone: Vec<i64> = existing
+        .iter()
+        .filter(|row| {
+            !seen.contains(row.path.as_str()) && !moved_from.contains(row.path.as_str()) && !is_vanished(&row.path)
+        })
+        .map(|row| row.id)
+        .collect();
+    for chunk in gone.chunks(BATCH) {
+        if stop() {
+            return Err(Stopped.into());
+        }
+        let ops: Vec<SyncOp> = chunk.iter().map(|&id| SyncOp::Delete(id)).collect();
+        store.apply_sync_ops(&ops)?;
+        summary.removed += chunk.len();
     }
     Ok(summary)
 }
@@ -545,7 +668,7 @@ mod tests {
     }
 
     fn run_probe(store: &mut IndexStore, root: &Path, probe: Probe) -> SyncSummary {
-        sync_with(store, &[root.to_path_buf()], &IndexOptions::default(), false, probe).unwrap()
+        sync_with(store, &[root.to_path_buf()], &IndexOptions::default(), false, probe, &|| false, &mut |_| {}).unwrap()
     }
 
     #[test]
@@ -688,5 +811,60 @@ mod tests {
         forget_volume(&store, &root.0).unwrap();
         let s = run_probe(&mut store, &root.0, &|_| Some(vol("uuid:A", "/Volumes/USB")));
         assert_eq!((s.roots[0].state, s.removed), (RootState::Online, 1));
+    }
+
+    #[test]
+    fn stopped_sync_deletes_and_changes_nothing() {
+        let (_d, root, mut store) = setup("stopped");
+        let a = write(&root.0, "a.txt", "aaa");
+        write(&root.0, "b.txt", "bbb");
+        run(&mut store, &[&root.0]);
+        let before = all(&store, &root.0);
+        fs::remove_file(a).unwrap();
+        write(&root.0, "c.txt", "ccc");
+        let roots = vec![root.0.clone()];
+        let err = sync_with_progress(&mut store, &roots, &IndexOptions::default(), false, &|| true, &mut |_| {}).unwrap_err();
+        assert!(err.downcast_ref::<Stopped>().is_some(), "{err:#}");
+        let after = all(&store, &root.0);
+        assert_eq!(before.iter().map(|r| r.id).collect::<Vec<_>>(), after.iter().map(|r| r.id).collect::<Vec<_>>());
+        // and the next, uninterrupted sync still sees the difference
+        let s = run(&mut store, &[&root.0]);
+        assert_eq!((s.removed, s.added, s.unchanged), (1, 1, 1));
+    }
+
+    #[test]
+    fn stop_between_batches_keeps_written_rows() {
+        let (_d, root, mut store) = setup("batchstop");
+        for i in 0..(BATCH + 5) {
+            write(&root.0, &format!("f{i:05}.txt"), "x");
+        }
+        let calls = std::cell::Cell::new(0);
+        // Calls: after the crawl (1), before batch 1 (2), before batch 2 (3: stop).
+        let stop = || {
+            calls.set(calls.get() + 1);
+            calls.get() >= 3
+        };
+        let roots = vec![root.0.clone()];
+        let err = sync_with_progress(&mut store, &roots, &IndexOptions::default(), false, &stop, &mut |_| {}).unwrap_err();
+        assert!(err.downcast_ref::<Stopped>().is_some());
+        let kept = all(&store, &root.0).len();
+        assert!(kept < BATCH + 5 && kept.is_multiple_of(BATCH), "{kept}");
+    }
+
+    #[test]
+    fn batched_sync_matches_a_small_tree_and_reports_progress() {
+        let (_d, root, mut store) = setup("batched");
+        let n = 2 * BATCH + 37;
+        for i in 0..n {
+            write(&root.0, &format!("f{i:05}.txt"), "x");
+        }
+        let roots = vec![root.0.clone()];
+        let mut seen = Vec::new();
+        let s = sync_with_progress(&mut store, &roots, &IndexOptions::default(), false, &|| false, &mut |n| seen.push(n)).unwrap();
+        assert_eq!((s.added, s.queued.len(), s.removed), (n, n, 0));
+        assert_eq!(s.queued.iter().collect::<HashSet<_>>().len(), n);
+        assert_eq!(seen.last(), Some(&n));
+        let s = run(&mut store, &[&root.0]);
+        assert_eq!((s.added, s.unchanged), (0, n));
     }
 }

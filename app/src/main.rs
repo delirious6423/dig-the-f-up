@@ -22,6 +22,38 @@ fn err<E: std::fmt::Display>(e: E) -> String {
     format!("{e:#}")
 }
 
+/// Plain-language text for a download failure; the raw error goes to the log, not the UI.
+fn friendly_download_error(raw: &str) -> String {
+    let l = raw.to_ascii_lowercase();
+    if l.contains("in progress") || l.contains("already running") {
+        "A download is already running.".into()
+    } else if l.contains("failed to lookup") || l.contains("dns") || l.contains("connection") || l.contains("request to")
+        || l.contains("timed out") || l.contains("proxy")
+    {
+        "Can't reach the download server. Check your internet connection and try again.".into()
+    } else if l.contains("stopped at") {
+        "The download was interrupted. Try again and it will continue where it stopped.".into()
+    } else if l.contains("space") {
+        "There is not enough free disk space for the download. Free some space and try again.".into()
+    } else if l.contains("http ") {
+        "The download server did not give the file. Try again in a few minutes.".into()
+    } else {
+        "The download did not finish. Check your internet connection and try again.".into()
+    }
+}
+
+/// Plain-language text for a failed open/reveal; logs the raw error.
+fn friendly_file_error(what: &str, raw: &str) -> String {
+    logging::error(&format!("{what}: {raw}"));
+    if raw.contains("not responding") {
+        "The drive or network share is not responding. Check that it is connected and try again.".into()
+    } else if raw.contains("No such file") || raw.contains("not found") || raw.contains("cannot find") {
+        "This file was moved or deleted since it was indexed.".into()
+    } else {
+        "Couldn't open this file. Check that an app that can open it is installed.".into()
+    }
+}
+
 /// How long a filesystem call may take before we give up (SMB shares and dead drives can block for minutes).
 const FS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 
@@ -157,7 +189,9 @@ fn event_json(ev: EngineEvent) -> serde_json::Value {
         EngineEvent::Rest { done, total, path, kind, state, note } => {
             json!({"type":"rest","done":done,"total":total,"path":path,"kind":kind,"state":state,"note":note})
         }
+        EngineEvent::Syncing { seen } => json!({"type":"syncing","seen":seen}),
         EngineEvent::Waiting => json!({"type":"waiting"}),
+        EngineEvent::Notice(m) => json!({"type":"notice","message":m}),
         EngineEvent::Error(m) => json!({"type":"error","message":m}),
         EngineEvent::Idle => json!({"type":"idle"}),
         EngineEvent::Stopped => json!({"type":"stopped"}),
@@ -168,11 +202,15 @@ fn model_ok() -> bool {
     dtfu_models::locate(&dtfu_models::TEXT).is_some() && dtfu_models::locate(&dtfu_models::MMPROJ).is_some()
 }
 
-/// Fetches the OCR (text in screenshots) models in the background: LightOnOCR (about 1 GB) on every platform (the
-/// engine off macOS, Vision's fallback on macOS) and, off macOS first, the two small `ocrs` files (12 MB) that read
-/// Latin text until LightOn is there. Engines pick the files up on their next call. A failure only costs OCR, so it is
-/// logged and not shown. The "cancel download" button does not stop it.
-fn fetch_ocr_models() {
+/// Fetches the OCR (text in screenshots) models in the background, off macOS only: first the two small `ocrs` files
+/// (12 MB) that read Latin text, then LightOnOCR (about 1 GB). Engines pick the files up on their next call.
+/// Emits "ocr-progress" `{name, done, total}`, then "ocr-ready" or "ocr-error" (plain message), and always "ocr-done". A failure only costs
+/// OCR. The "cancel download" button does not stop it.
+fn fetch_ocr_models(app: AppHandle) {
+    // macOS reads text with Vision; the 1 GB LightOn download is not started behind the user's back there.
+    if cfg!(target_os = "macos") {
+        return;
+    }
     let want_ocrs = !cfg!(target_os = "macos") && !dtfu_models::ocrs_present();
     if !want_ocrs && dtfu_models::lighton_present() {
         return;
@@ -181,29 +219,60 @@ fn fetch_ocr_models() {
     if RUNNING.swap(true, std::sync::atomic::Ordering::SeqCst) {
         return;
     }
+    let done_app = app.clone();
     std::thread::spawn(move || {
-        struct Done;
+        /// "ocr-done" on every way out (success, failure, cancel, another download running, panic), so the UI
+        /// never keeps showing a download that ended.
+        struct Done(AppHandle);
         impl Drop for Done {
             fn drop(&mut self) {
                 RUNNING.store(false, std::sync::atomic::Ordering::SeqCst); // also after a panic
+                let _ = self.0.emit("ocr-done", ());
             }
         }
-        let _done = Done;
+        let _done = Done(done_app);
         // Its own flag: the "cancel download" button stops the embedding model download, not this one.
         let never = std::sync::atomic::AtomicBool::new(false);
+        // Returns true on success.
         let report = |what: &str, result: anyhow::Result<Vec<std::path::PathBuf>>| match result {
-            Ok(_) => logging::info(&format!("{what} downloaded")),
-            Err(e) if dtfu_models::is_cancelled(&e) => {}
+            Ok(_) => {
+                logging::info(&format!("{what} downloaded"));
+                true
+            }
+            Err(e) if dtfu_models::is_cancelled(&e) => false,
             // `dtfu download` is fetching them right now; it finishes the job.
-            Err(e) if format!("{e:#}").contains("in progress") => logging::info(&format!("{what}: {e:#}")),
-            Err(e) => logging::error(&format!("{what} download failed: {e:#}")),
+            Err(e) if format!("{e:#}").contains("in progress") => {
+                logging::info(&format!("{what}: {e:#}"));
+                false
+            }
+            Err(e) => {
+                logging::error(&format!("{what} download failed: {e:#}"));
+                let _ = app.emit("ocr-error", friendly_download_error(&format!("{e:#}")));
+                false
+            }
+        };
+        let mut last: Option<(String, u64)> = None;
+        let mut progress = |name: &str, done: u64, total: u64| {
+            // Throttle to roughly every 256 KiB per file, always pass the final tick.
+            let stepped = match &last {
+                Some((n, l)) if n == name => done.saturating_sub(*l) >= 256 * 1024,
+                _ => true,
+            };
+            if done == total || stepped {
+                last = Some((name.to_string(), done));
+                let _ = app.emit("ocr-progress", serde_json::json!({"name": name, "done": done, "total": total}));
+            }
         };
         // Off macOS the small `ocrs` models (12 MB) first, so screenshots get OCR while LightOn (1 GB) downloads.
         if want_ocrs {
-            report("OCR models (ocrs)", dtfu_models::download_ocrs(&never, &mut |_, _, _| {}));
+            logging::info("OCR models (ocrs) download started");
+            report("OCR models (ocrs)", dtfu_models::download_ocrs(&never, &mut progress));
         }
-        // LightOnOCR: the default engine off macOS, Vision's fallback for unsupported scripts on macOS.
-        report("OCR models (LightOnOCR)", dtfu_models::download_lighton(&never, &mut |_, _, _| {}));
+        // LightOnOCR: the default engine off macOS.
+        logging::info("OCR models (LightOnOCR) download started");
+        if report("OCR models (LightOnOCR)", dtfu_models::download_lighton(&never, &mut progress)) {
+            let _ = app.emit("ocr-ready", ());
+        }
     });
 }
 
@@ -242,18 +311,23 @@ async fn set_watch(engine: Eng<'_>, enabled: bool, policy: String) -> Res<LiveDt
 
 #[tauri::command]
 async fn set_usage_tracking(engine: Eng<'_>, on: bool) -> Res<LiveDto> {
-    engine.set_usage_tracking(on).map_err(err)?;
-    Ok(live_dto(&engine))
+    let engine = Arc::clone(engine.inner());
+    tauri::async_runtime::spawn_blocking(move || engine.set_usage_tracking(on).map(|()| live_dto(&engine)))
+        .await
+        .map_err(err)?
+        .map_err(err)
 }
 
 #[tauri::command]
 async fn clear_usage(engine: Eng<'_>) -> Res<()> {
-    engine.clear_usage().map_err(err)
+    let engine = Arc::clone(engine.inner());
+    tauri::async_runtime::spawn_blocking(move || engine.clear_usage()).await.map_err(err)?.map_err(err)
 }
 
 #[tauri::command]
 async fn counts(engine: Eng<'_>) -> Res<CountsDto> {
-    engine.counts().map(counts_dto).map_err(err)
+    let engine = Arc::clone(engine.inner());
+    tauri::async_runtime::spawn_blocking(move || engine.counts().map(counts_dto)).await.map_err(err)?.map_err(err)
 }
 
 #[tauri::command]
@@ -370,9 +444,25 @@ async fn pause(engine: Eng<'_>) -> Res<()> {
 }
 
 #[tauri::command]
-fn resume(engine: Eng<'_>) -> Res<()> {
-    engine.resume();
-    Ok(())
+async fn resume(engine: Eng<'_>) -> Res<()> {
+    let engine = Arc::clone(engine.inner());
+    tauri::async_runtime::spawn_blocking(move || engine.resume()).await.map_err(err)
+}
+
+/// Native yes/no question (`window.confirm` is unreliable in the webview). True when the user picks `ok`.
+#[tauri::command]
+async fn ask(app: AppHandle, message: String, ok: String) -> Res<bool> {
+    use tauri_plugin_dialog::{MessageDialogButtons, MessageDialogKind};
+    tauri::async_runtime::spawn_blocking(move || {
+        app.dialog()
+            .message(message)
+            .title("Dig-the-f-up")
+            .kind(MessageDialogKind::Warning)
+            .buttons(MessageDialogButtons::OkCancelCustom(ok, "Cancel".into()))
+            .blocking_show()
+    })
+    .await
+    .map_err(err)
 }
 
 #[tauri::command]
@@ -402,9 +492,10 @@ fn model_info() -> ModelInfo {
 fn download_models(app: AppHandle) -> Res<()> {
     static BUSY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     if BUSY.swap(true, std::sync::atomic::Ordering::SeqCst) {
-        return Err("download already running".into());
+        return Err("A download is already running.".into());
     }
     CANCEL.store(false, std::sync::atomic::Ordering::SeqCst);
+    logging::info("model download started");
     std::thread::spawn(move || {
         struct Done;
         impl Drop for Done {
@@ -429,11 +520,12 @@ fn download_models(app: AppHandle) -> Res<()> {
         };
         match dtfu_models::download_all(&files, &dir, None, &CANCEL, &mut progress) {
             Ok(_) => {
+                logging::info("model download finished");
                 let _ = app.emit("model-ready", ());
                 if let Some(engine) = app.try_state::<Arc<Engine>>() {
                     let _ = engine.start_indexing();
                 }
-                fetch_ocr_models();
+                fetch_ocr_models(app.clone());
             }
             Err(e) if dtfu_models::is_cancelled(&e) => {
                 logging::info("model download cancelled; partial files kept");
@@ -441,7 +533,7 @@ fn download_models(app: AppHandle) -> Res<()> {
             }
             Err(e) => {
                 logging::error(&format!("model download failed: {e:#}"));
-                let _ = app.emit("model-error", format!("{e:#}"));
+                let _ = app.emit("model-error", friendly_download_error(&format!("{e:#}")));
             }
         }
     });
@@ -459,12 +551,19 @@ async fn checked_path(engine: &Engine, path: &str) -> Res<PathBuf> {
     let folders = engine.folders();
     let path = path.to_string();
     fs_call("check path", move || {
-        let p = std::fs::canonicalize(&path).map_err(err)?;
+        let p = std::fs::canonicalize(&path).map_err(|e| {
+            logging::error(&format!("check path {path}: {e}"));
+            if e.kind() == std::io::ErrorKind::NotFound {
+                "This file was moved or deleted since it was indexed.".to_string()
+            } else {
+                "Can't reach this file. Check that its drive or folder is connected.".to_string()
+            }
+        })?;
         if !p.is_file() {
-            return Err("not a file".into());
+            return Err("This file was moved or deleted since it was indexed.".into());
         }
         let under = folders.iter().any(|f| std::fs::canonicalize(f).map(|f| p.starts_with(f)).unwrap_or(false));
-        if under { Ok(p) } else { Err("path is outside the indexed folders".into()) }
+        if under { Ok(p) } else { Err("This file is not in one of your searched folders.".into()) }
     })
     .await
 }
@@ -496,7 +595,7 @@ async fn checked_indexed(engine: &Eng<'_>, path: &str) -> Res<PathBuf> {
     })
     .await
     .map_err(err)??;
-    if found { Ok(p) } else { Err("file is not in the index".into()) }
+    if found { Ok(p) } else { Err("This file is no longer in the search index. Try searching again.".into()) }
 }
 
 /// Path strings to look up in the index: as given, then canonical (when different and valid UTF-8).
@@ -517,14 +616,18 @@ async fn open_hit(app: AppHandle, engine: Eng<'_>, path: String, kind: String, l
     // Feeds ranking and indexing order when the user turned open-history on; a no-op otherwise. Never blocks the open.
     let _ = engine.record_open(&path);
     let handle = app.clone();
-    fs_call_within(HANDOFF_TIMEOUT, "open file", move || opener::open_at(&handle, &p, &kind, loc, &query)).await
+    fs_call_within(HANDOFF_TIMEOUT, "open file", move || opener::open_at(&handle, &p, &kind, loc, &query))
+        .await
+        .map_err(|e| friendly_file_error("open file", &e))
 }
 
 #[tauri::command]
 async fn reveal_path(app: AppHandle, engine: Eng<'_>, path: String) -> Res<()> {
     let p = checked_indexed(&engine, &path).await?;
     let handle = app.clone();
-    fs_call_within(HANDOFF_TIMEOUT, "reveal file", move || handle.opener().reveal_item_in_dir(p).map_err(err)).await
+    fs_call_within(HANDOFF_TIMEOUT, "reveal file", move || handle.opener().reveal_item_in_dir(p).map_err(err))
+        .await
+        .map_err(|e| friendly_file_error("reveal file", &e))
 }
 
 const THUMB_SIDE: u32 = 96;
@@ -604,6 +707,15 @@ fn thumb_semaphore() -> &'static tokio::sync::Semaphore {
     S.get_or_init(|| tokio::sync::Semaphore::new(THUMB_CONCURRENCY))
 }
 
+/// Set when the global shortcut could not be registered (the "shortcut-error" event may fire before the UI listens).
+static SHORTCUT_ERROR: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// The shortcut failure message, if any, for a UI that loaded after the event.
+#[tauri::command]
+fn shortcut_error() -> Option<String> {
+    SHORTCUT_ERROR.get().cloned()
+}
+
 #[tauri::command]
 fn quit(app: AppHandle) {
     app.exit(0);
@@ -621,6 +733,10 @@ fn toggle_window(app: &AppHandle) {
     }
 }
 
+/// Menu id of "Quit" (non-macOS).
+#[cfg(not(target_os = "macos"))]
+const QUIT_ITEM: &str = "quit_app";
+
 /// Menu id of "Show Logs".
 const SHOW_LOGS: &str = "show_logs";
 
@@ -633,7 +749,11 @@ fn show_logs(app: &AppHandle) {
 }
 
 fn build_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
+    #[cfg(target_os = "macos")]
     let app_menu = Submenu::with_items(app, "Dig-the-f-up", true, &[&PredefinedMenuItem::hide(app, None)?, &PredefinedMenuItem::quit(app, None)?])?;
+    // Predefined Hide/Quit are unsupported on Linux: a plain item that exits works everywhere.
+    #[cfg(not(target_os = "macos"))]
+    let app_menu = Submenu::with_items(app, "Dig-the-f-up", true, &[&MenuItem::with_id(app, QUIT_ITEM, "Quit", true, Some("CmdOrCtrl+Q"))?])?;
     let show_logs = MenuItem::with_id(app, SHOW_LOGS, "Show Logs", true, None::<&str>)?;
     let help = Submenu::with_items(app, "Help", true, &[&show_logs])?;
     let edit = Submenu::with_items(
@@ -681,6 +801,10 @@ fn main() {
             if event.id() == SHOW_LOGS {
                 show_logs(app);
             }
+            #[cfg(not(target_os = "macos"))]
+            if event.id() == QUIT_ITEM {
+                app.exit(0);
+            }
         })
         .setup(move |app| {
             use tauri_plugin_global_shortcut::GlobalShortcutExt;
@@ -698,8 +822,17 @@ fn main() {
             let handle = app.handle().clone();
             std::thread::spawn(move || {
                 while let Ok(ev) = rx.recv() {
-                    if let EngineEvent::Error(m) = &ev {
-                        logging::error(&format!("indexing: {m}"));
+                    match &ev {
+                        EngineEvent::Error(m) => logging::error(&format!("indexing: {m}")),
+                        EngineEvent::Synced { added, changed, moved, removed, offline, different_drive, .. } => {
+                            logging::info(&format!(
+                                "sync: {added} added, {changed} changed, {moved} moved, {removed} removed; offline folders: {}; other drive: {}",
+                                offline.len(),
+                                different_drive.len()
+                            ));
+                        }
+                        EngineEvent::Idle => logging::info("indexing idle"),
+                        _ => {}
                     }
                     let _ = handle.emit("engine-event", event_json(ev));
                 }
@@ -712,7 +845,7 @@ fn main() {
             }
             // Installs whose embedding models came before OCR models were downloaded get them now.
             if model_ok() {
-                fetch_ocr_models();
+                fetch_ocr_models(app.handle().clone());
             }
             app.manage(engine);
 
@@ -721,18 +854,30 @@ fn main() {
             let sc = if cfg!(target_os = "macos") { shortcut } else { shortcut_ctrl };
             if let Err(e) = app.global_shortcut().register(sc) {
                 logging::error(&format!("global shortcut: {e}"));
+                let msg = format!(
+                    "The {} shortcut could not be set because another app is using it. You can still open Dig-the-f-up from the {}.",
+                    if cfg!(target_os = "macos") { "Cmd+Shift+Space" } else { "Ctrl+Shift+Space" },
+                    if cfg!(target_os = "macos") { "Dock" } else { "taskbar or Start menu" }
+                );
+                let _ = SHORTCUT_ERROR.set(msg.clone());
+                let _ = app.emit("shortcut-error", msg);
             }
             Ok(())
         })
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
-                api.prevent_close();
-                let _ = window.hide();
+                // macOS: hide, the Dock icon brings it back. Elsewhere there is no tray icon, so Close quits.
+                if cfg!(target_os = "macos") {
+                    api.prevent_close();
+                    let _ = window.hide();
+                } else {
+                    window.app_handle().exit(0);
+                }
             }
         })
         .invoke_handler(tauri::generate_handler![
             search, status, counts, live, set_watch, set_usage_tracking, clear_usage, folders, folder_states, use_drive_now, add_folder, remove_folder, suggested_folders, pick_folder, start_indexing,
-            pause, resume, model_present, model_info, download_models, cancel_download, open_hit, reveal_path, quit, thumbnail
+            pause, resume, model_present, model_info, download_models, cancel_download, open_hit, reveal_path, quit, thumbnail, ask, shortcut_error
         ])
         .build(tauri::generate_context!())
         .expect("error while building Dig-the-f-up")

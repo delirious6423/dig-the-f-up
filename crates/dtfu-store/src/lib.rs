@@ -9,6 +9,7 @@ use std::path::Path;
 use std::time::Duration;
 
 pub mod index;
+pub mod lock;
 pub mod migrate;
 pub mod scan;
 

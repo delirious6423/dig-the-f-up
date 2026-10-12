@@ -22,6 +22,13 @@ pub enum Classification {
 /// Rules.swift:14-16
 pub const SKIPPED_FOLDER_NAMES: &[&str] = &[
     "node_modules", "bower_components", "venv", "site-packages", "__pycache__", "DerivedData", "Pods", "Carthage",
+    // Port additions. Python distributions hold thousands of package docs and images under non-hidden names.
+    "anaconda3", "miniconda3", "miniforge3",
+    // Steam game installs: assets, not user files.
+    "steamapps",
+    // Backups and recycle bins: copies of files already indexed elsewhere, or system-owned.
+    "Backups.backupdb", "WindowsImageBackup", "FileHistory", "$RECYCLE.BIN", "Windows.old", "$WINDOWS.~BT",
+    "System Volume Information",
 ];
 
 /// Rules.swift:19-21
@@ -278,6 +285,11 @@ pub fn classify(path: &Path, options: &CrawlOptions) -> Classification {
     }
 }
 
+const LOCKFILE_NAMES: &[&str] = &[
+    "package-lock.json", "npm-shrinkwrap.json", "pnpm-lock.yaml", "bun.lockb", "go.sum", "package.resolved",
+    "cartfile.resolved", "gradle.lockfile", "packages.lock.json", "poetry.lock", "pipfile.lock",
+];
+
 /// Rules.swift:68-85.
 pub fn classify_code(path: &Path, options: &CrawlOptions) -> Classification {
     let name = file_name(path);
@@ -294,6 +306,10 @@ pub fn classify_code(path: &Path, options: &CrawlOptions) -> Classification {
     }
     if ["license", "licence", "copying", "notice"].iter().any(|p| lower.starts_with(p)) {
         return Classification::Skip("license");
+    }
+    // Not in Rules.swift: dependency lockfiles are long machine-written lists that crowd out real code in results.
+    if ext == "lock" || LOCKFILE_NAMES.contains(&lower.as_str()) {
+        return Classification::Skip("lockfile");
     }
     if (ext == "ts" || ext == "mts") && is_mpeg_transport_stream(path) {
         return Classification::Ignore; // a video
@@ -369,6 +385,14 @@ pub fn is_screenshot(path: &Path) -> bool {
     SCREENSHOT_PREFIXES.iter().any(|p| name.starts_with(p))
 }
 
+/// `dir` is a `/`-separated folder path without a trailing slash: is it a drive or mount root?
+fn is_volume_root(dir: &str) -> bool {
+    let b = dir.as_bytes();
+    dir.is_empty() // "/"
+        || (b.len() == 2 && b[1] == b':') // "C:"
+        || ["/Volumes/", "/mnt/", "/media/"].iter().any(|m| dir.strip_prefix(m).is_some_and(|r| !r.contains('/')))
+}
+
 /// Rules.swift:146-152.
 pub fn skip_reason_for_folder(path: &str, home: &str, excluded: &[String]) -> Option<&'static str> {
     let name = path.rsplit('/').next().unwrap_or(path);
@@ -380,6 +404,21 @@ pub fn skip_reason_for_folder(path: &str, home: &str, excluded: &[String]) -> Op
     }
     if !home.is_empty() && path == format!("{home}/Library") {
         return Some("~/Library");
+    }
+    // App data that is not user content: Windows %USERPROFILE%\AppData, and Snap's per-app copies on Linux.
+    if !home.is_empty() && (path == format!("{home}/AppData") || path == format!("{home}/snap")) {
+        return Some("app data");
+    }
+    let grandparent = path.rsplit('/').nth(2);
+    // An old Mac's home copied to another drive (/Volumes/Old/Users/me/Library): the `home` rule cannot match it.
+    if name == "Library" && grandparent == Some("Users") {
+        return Some("~/Library");
+    }
+    // Time Machine in-flight/old snapshot folders sit directly under the backup volume's root.
+    if (name.ends_with(".backup") || name.ends_with(".previous") || name.ends_with(".inprogress"))
+        && is_volume_root(path[..path.len() - name.len()].trim_end_matches('/'))
+    {
+        return Some("backup");
     }
     if excluded.iter().any(|e| path == e || path.starts_with(&format!("{e}/"))) {
         return Some("excluded folder");

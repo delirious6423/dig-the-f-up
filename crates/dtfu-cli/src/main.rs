@@ -123,6 +123,11 @@ fn states_line(states: &std::collections::BTreeMap<String, usize>) -> String {
 
 fn cmd_index(args: &Args) -> Result<()> {
     let code = args.flags.contains("--code");
+    std::fs::create_dir_all(args.index_dir())?;
+    let _indexer = match dtfu_store::lock::IndexerLock::try_acquire(&args.index_dir())? {
+        Some(l) => l,
+        None => bail!("another dtfu process (the app?) is indexing this index; try again when it is done"),
+    };
     let mut store = IndexStore::open(&args.index_dir(), args.file())?;
     let opts = IndexOptions { include_code: code, ..IndexOptions::default() };
     let roots: Vec<PathBuf> = args.positional.iter().map(PathBuf::from).collect();

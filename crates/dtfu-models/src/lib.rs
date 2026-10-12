@@ -320,6 +320,7 @@ pub fn download_cancellable(
         Some(base) => format!("{}/{}", base.trim_end_matches('/'), file.name),
         None => url(file),
     };
+    // Proxies from HTTPS_PROXY / HTTP_PROXY / ALL_PROXY are honoured (ureq feature `proxy-from-env`).
     let agent = ureq::AgentBuilder::new()
         .redirects(5)
         .timeout_connect(Duration::from_secs(30))
