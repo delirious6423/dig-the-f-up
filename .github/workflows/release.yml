@@ -1,0 +1,147 @@
+name: release
+
+# Builds the macOS (Apple Silicon) app bundle for a version tag and attaches it to a DRAFT GitHub release.
+# Nothing is published automatically: the owner reviews the draft and clicks Publish. See docs/RELEASING.md.
+#
+# Signing and notarization run only when the matching repository secrets exist. Without them the job still
+# produces an unsigned, un-notarized zip whose name says so.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  # Shipped binaries must use the portable CPU baseline (same setting as ci.yml).
+  NATIVE: "0"
+  BACKEND: "metal"
+
+jobs:
+  macos-arm64:
+    name: macOS arm64 bundle
+    runs-on: macos-14
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check tag matches app version
+        shell: bash
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          app_ver="$(sed -n 's/^  *"version": *"\([^"]*\)".*/\1/p' app/tauri.conf.json | head -1)"
+          if [[ "$tag" != "$app_ver" ]]; then
+            echo "error: tag v$tag does not match app/tauri.conf.json version $app_ver" >&2
+            exit 1
+          fi
+          echo "VERSION=$tag" >> "$GITHUB_ENV"
+
+      - name: Detect signing and notarization secrets
+        id: secrets
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        shell: bash
+        run: |
+          if [[ -n "$APPLE_CERTIFICATE" && -n "$APPLE_CERTIFICATE_PASSWORD" && -n "$APPLE_SIGNING_IDENTITY" ]]; then
+            echo "signing=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "signing=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No signing secrets: building an unsigned bundle."
+          fi
+          if [[ -n "$APPLE_ID" && -n "$APPLE_PASSWORD" && -n "$APPLE_TEAM_ID" ]]; then
+            echo "notarize=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "notarize=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No notarization secrets: the bundle will not be notarized."
+          fi
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspace: app
+
+      - name: Install build tools
+        run: brew install cmake
+
+      - name: Build llama.cpp (b11461 + patch, Metal)
+        shell: bash
+        run: scripts/build-llama.sh
+
+      - name: Install tauri-cli
+        run: cargo install tauri-cli --version '^2' --locked
+
+      - name: Build unsigned bundle
+        if: steps.secrets.outputs.signing == 'false'
+        working-directory: app
+        run: cargo tauri build --bundles app
+
+      # Tauri 2 signs and (when APPLE_ID is set) notarizes during the build when these variables are present.
+      - name: Build signed bundle
+        if: steps.secrets.outputs.signing == 'true'
+        working-directory: app
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ steps.secrets.outputs.notarize == 'true' && secrets.APPLE_ID || '' }}
+          APPLE_PASSWORD: ${{ steps.secrets.outputs.notarize == 'true' && secrets.APPLE_PASSWORD || '' }}
+          APPLE_TEAM_ID: ${{ steps.secrets.outputs.notarize == 'true' && secrets.APPLE_TEAM_ID || '' }}
+        run: cargo tauri build --bundles app
+
+      - name: Verify signature and notarization ticket
+        if: steps.secrets.outputs.signing == 'true'
+        shell: bash
+        run: |
+          app="app/target/release/bundle/macos/DigUp.app"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          if [[ "${{ steps.secrets.outputs.notarize }}" == "true" ]]; then
+            xcrun stapler validate "$app"
+          fi
+
+      - name: Package zip and checksum
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          app="app/target/release/bundle/macos/DigUp.app"
+          test -d "$app"
+          if [[ "${{ steps.secrets.outputs.signing }}" == "true" ]]; then
+            name="DigUp-${VERSION}-macos-arm64.zip"
+          else
+            name="DigUp-${VERSION}-macos-arm64-UNSIGNED.zip"
+          fi
+          mkdir -p dist-out
+          ditto -c -k --keepParent "$app" "dist-out/$name"
+          (cd dist-out && shasum -a 256 "$name" > "$name.sha256")
+          cat "dist-out/$name.sha256"
+          echo "zip=dist-out/$name" >> "$GITHUB_OUTPUT"
+          echo "sha=dist-out/$name.sha256" >> "$GITHUB_OUTPUT"
+
+      - name: Upload to draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          zip="${{ steps.package.outputs.zip }}"
+          sha="${{ steps.package.outputs.sha }}"
+          notes="Draft built from tag ${GITHUB_REF_NAME}. Review, then publish."
+          if [[ "${{ steps.secrets.outputs.signing }}" != "true" ]]; then
+            notes="$notes
+
+UNSIGNED BUILD: macOS Gatekeeper will block it on first launch. Right-click DigUp.app and choose Open, or see docs/RELEASING.md."
+          fi
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" "$zip" "$sha" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" "$zip" "$sha" --draft --verify-tag \
+              --title "DigUp $GITHUB_REF_NAME" --notes "$notes"
+          fi
