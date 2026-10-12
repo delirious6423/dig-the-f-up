@@ -102,8 +102,8 @@
     }
   }
 
-  const open = (h) => invoke("open_hit", { path: h.path, kind: h.kind, loc: h.loc ?? null, query: $("q").value }).catch((e) => alert(e));
-  const reveal = (h) => invoke("reveal_path", { path: h.path }).catch((e) => alert(e));
+  const open = (h) => invoke("open_hit", { path: h.path, kind: h.kind, loc: h.loc ?? null, query: $("q").value }).catch((e) => showError(e));
+  const reveal = (h) => invoke("reveal_path", { path: h.path }).catch((e) => showError(e));
 
   $("q").addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(() => { timer = null; doSearch(); }, 200); });
   $("results").addEventListener("click", (ev) => {
@@ -128,7 +128,7 @@
     $("folderList").innerHTML = fs.map((f, i) =>
       `<li><span>${esc(f)}</span><button data-i="${i}">Remove</button></li>`).join("") || '<li class="dim">No folders yet.</li>';
     $("folderList").querySelectorAll("button").forEach((b) => b.addEventListener("click", async () => {
-      try { await invoke("remove_folder", { path: fs[+b.dataset.i] }); } catch (e) { alert(e); }
+      try { await invoke("remove_folder", { path: fs[+b.dataset.i] }); } catch (e) { showError(e); }
       loadFolders(); refreshStatus();
     }));
   }
@@ -139,14 +139,14 @@
       await invoke("add_folder", { path: p });
       if (modelPresent) await invoke("start_indexing");
       $("welcome").hidden = true;
-    } catch (e) { alert(e); }
+    } catch (e) { showError(e); }
     loadFolders(); refreshStatus();
   }
   async function pickAndAdd() {
     try {
       const p = await invoke("pick_folder");
       if (p) await addFolderPath(p);
-    } catch (e) { alert(e); }
+    } catch (e) { showError(e); }
   }
   $("addFolder").addEventListener("click", pickAndAdd);
   $("welcomeAdd").addEventListener("click", pickAndAdd);
@@ -156,7 +156,7 @@
   });
   $("welcomeDl").addEventListener("click", () => $("dlBtn").click());
   $("pauseBtn").addEventListener("click", async () => {
-    try { await invoke(status.state === "paused" ? "resume" : "pause"); } catch (e) { alert(e); }
+    try { await invoke(status.state === "paused" ? "resume" : "pause"); } catch (e) { showError(e); }
     refreshStatus();
   });
 
@@ -217,12 +217,12 @@
   $("livePill").addEventListener("click", () => { const p = $("folders"); p.hidden = false; loadFolders(); p.scrollIntoView({ block: "nearest" }); });
   $("syncNow").addEventListener("click", async () => {
     $("syncNow").disabled = true;
-    try { await invoke("start_indexing"); } catch (e) { alert(e); }
+    try { await invoke("start_indexing"); } catch (e) { showError(e); }
     $("syncNow").disabled = false;
     refreshStatus();
   });
   async function saveWatch() {
-    try { liveData = await invoke("set_watch", { enabled: $("watchOn").checked, policy: $("watchPolicy").value }); } catch (e) { alert(e); }
+    try { liveData = await invoke("set_watch", { enabled: $("watchOn").checked, policy: $("watchPolicy").value }); } catch (e) { showError(e); }
     renderLive();
   }
   $("watchOn").addEventListener("change", saveWatch);
@@ -230,13 +230,30 @@
   $("usageOn").addEventListener("change", async () => {
     const on = $("usageOn").checked;
     if (!on && !confirm("Turn off and delete the history of files you opened?")) { $("usageOn").checked = true; return; }
-    try { liveData = await invoke("set_usage_tracking", { on }); } catch (e) { alert(e); }
+    try { liveData = await invoke("set_usage_tracking", { on }); } catch (e) { showError(e); }
     renderLive();
   });
   $("clearUsage").addEventListener("click", async () => {
     if (!confirm("Delete the history of files you opened?")) return;
-    try { await invoke("clear_usage"); } catch (e) { alert(e); }
+    try { await invoke("clear_usage"); } catch (e) { showError(e); }
   });
+
+  // Inline banner for errors and notices (replaces alert()).
+  function showBanner(msg, kind) {
+    $("banner").className = "banner " + kind;
+    $("bannerText").textContent = String(msg);
+    $("banner").hidden = false;
+  }
+  function showError(msg) { showBanner(msg, "error"); }
+  function showNotice(msg) { showBanner(msg, "notice"); }
+  function dismissBanner() { $("banner").hidden = true; }
+  $("bannerClose").addEventListener("click", dismissBanner);
+
+  // Model size comes from the pinned manifest in the app, not hard-coded here.
+  invoke("model_info").then((m) => {
+    const label = `${Math.round(m.totalBytes / 1e6)} MB`;
+    document.querySelectorAll(".modelSize").forEach((el) => { el.textContent = label; });
+  }).catch(() => {});
 
   // Status bar
   function renderStatus() {
@@ -244,6 +261,7 @@
     renderLive();
     $("dl").hidden = modelPresent;
     $("dlBtn").hidden = downloading;
+    $("cancelDl").hidden = !downloading;
     if (!modelPresent) { if (!downloading) $("statusText").textContent = "No model"; return; }
     const s = status;
     let t;
@@ -265,18 +283,26 @@
     renderStatus();
   }
   $("dlBtn").addEventListener("click", async () => {
-    downloading = true; $("dlBar").hidden = false; $("dlBar").value = 0; renderStatus();
+    downloading = true; $("dlBar").hidden = false; $("dlBar").value = 0; $("cancelDl").hidden = false; renderStatus();
+    dismissBanner();
     $("statusText").textContent = "Downloading…";
-    try { await invoke("download_models"); } catch (e) { downloading = false; alert(e); renderStatus(); }
+    try { await invoke("download_models"); } catch (e) { finishDownload(); showError(e); renderStatus(); }
   });
+
+  $("cancelDl").addEventListener("click", async () => {
+    $("cancelDl").disabled = true; $("statusText").textContent = "Cancelling…";
+    try { await invoke("cancel_download"); } catch (e) { showError(e); }
+  });
+  function finishDownload() { downloading = false; $("dlBar").hidden = true; $("cancelDl").hidden = true; $("cancelDl").disabled = false; }
+  listen("model-cancelled", (ev) => { finishDownload(); showNotice(ev.payload); refreshStatus(); });
 
   listen("model-progress", (ev) => {
     const p = ev.payload;
     $("dlBar").max = p.total || 1; $("dlBar").value = p.done;
     $("statusText").textContent = `Downloading ${p.name} ${Math.round(p.done / 1048576)}/${Math.round(p.total / 1048576)} MB`;
   });
-  listen("model-ready", () => { downloading = false; $("dlBar").hidden = true; refreshStatus(); });
-  listen("model-error", (ev) => { downloading = false; $("dlBar").hidden = true; $("statusText").textContent = "Download failed: " + ev.payload; renderStatus(); $("statusText").textContent = "Download failed: " + ev.payload; });
+  listen("model-ready", () => { finishDownload(); dismissBanner(); refreshStatus(); });
+  listen("model-error", (ev) => { finishDownload(); showError("Download failed: " + ev.payload); renderStatus(); });
   let evTimer = null;
   listen("engine-event", (ev) => {
     const p = ev.payload;

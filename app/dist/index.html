@@ -49,12 +49,13 @@
   <button id="pauseBtn" hidden>Pause</button>
   <button id="addFolder">Add folder…</button>
 </section>
+<div id="banner" class="banner" role="alert" hidden><span id="bannerText"></span><button id="bannerClose" aria-label="Dismiss">Dismiss</button></div>
 <main>
   <section id="welcome" hidden>
     <h1>Welcome to DigUp</h1>
     <p>Search your files by meaning. Choose folders to index; everything stays on this Mac.</p>
-    <p id="welcomeStep" class="dim">Step 1: download the model (860 MB), step 2: choose folders</p>
-    <p><button id="welcomeDl">Download model (860 MB)</button></p>
+    <p id="welcomeStep" class="dim">Step 1: download the model (<span class="modelSize">… MB</span>), step 2: choose folders</p>
+    <p><button id="welcomeDl">Download model (<span class="modelSize">… MB</span>)</button></p>
     <div id="welcomeChoices"></div>
     <p><button id="welcomeAdd">Add another folder…</button></p>
   </section>
@@ -62,7 +63,7 @@
 </main>
 <footer>
   <span id="statusText">…</span>
-  <span id="dl" hidden><button id="dlBtn">Download model (860 MB)</button><progress id="dlBar" value="0" max="1" hidden></progress></span>
+  <span id="dl" hidden><button id="dlBtn">Download model (<span class="modelSize">… MB</span>)</button><button id="cancelDl" hidden>Cancel</button><progress id="dlBar" value="0" max="1" hidden></progress></span>
 </footer>
 <script src="app.js"></script>
 </body>

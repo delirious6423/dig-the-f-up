@@ -4,15 +4,27 @@
 //! cache snapshot for the pinned revision. A file counts as present only when its size matches; checksums are
 //! checked by [`verify`] and by [`download`], never on lookup.
 
+mod disk;
+mod paths;
+
+pub use disk::{available_bytes, check_free_space, ensure_disk_space, remaining_bytes};
+pub use paths::{
+    app_data_dir, logs_dir, models_dir, resolve_app_data_dir, resolve_models_dir, APP_DIR_NAME,
+    LEGACY_APP_DIR_NAME, MODELS_DIR_NAME,
+};
+
 use anyhow::{anyhow, bail, Context, Result};
 use sha2::{Digest, Sha256};
 use std::fs::{self, File, OpenOptions};
 use std::io::{ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 /// Environment variable that replaces the model folder lookup.
 pub const MODELS_ENV: &str = "DIGUP_MODELS";
+/// Free space that must remain on the models volume after a download (on top of the bytes still to fetch).
+pub const DISK_MARGIN: u64 = 1 << 30;
 /// Hugging Face repository that hosts the files.
 pub const REPOSITORY: &str = "ggml-org/embeddinggemma-2-GGUF";
 /// Pinned repository revision (the same commit the Swift app pins).
@@ -50,18 +62,6 @@ pub const MMPROJ: ModelFile = ModelFile {
 /// The download URL of `file` at the pinned revision (Hugging Face redirects it to a CDN that takes ranges).
 pub fn url(file: &ModelFile) -> String {
     format!("{RESOLVE_PREFIX}/{REVISION}/{}", file.name)
-}
-
-/// The app's models folder: `$DIGUP_MODELS` if set and non-empty, else `<platform data dir>/DigUp/Models`
-/// (macOS: `~/Library/Application Support/DigUp/Models`).
-pub fn models_dir() -> PathBuf {
-    if let Some(dir) = env_dir(MODELS_ENV) {
-        return dir;
-    }
-    dirs::data_dir()
-        .unwrap_or_default()
-        .join("DigUp")
-        .join("Models")
 }
 
 /// The pinned revision's folder in the Hugging Face cache: `$HF_HUB_CACHE`, else `$HF_HOME/hub`, else
@@ -152,6 +152,39 @@ pub fn download(
     base_url: Option<&str>,
     progress: &mut dyn FnMut(u64, u64),
 ) -> Result<PathBuf> {
+    download_cancellable(file, dest_dir, base_url, &AtomicBool::new(false), progress)
+}
+
+/// The error returned when a download was stopped through its cancel flag. The `.part` file is kept, so the next
+/// call resumes from it. Test with [`is_cancelled`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Cancelled;
+
+impl std::fmt::Display for Cancelled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "download cancelled; partial files were kept and will resume"
+        )
+    }
+}
+
+impl std::error::Error for Cancelled {}
+
+/// True when `err` is (or wraps) [`Cancelled`].
+pub fn is_cancelled(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<Cancelled>().is_some()
+}
+
+/// Like [`download`], but stops with [`Cancelled`] as soon as `cancel` is set: before the request, or between
+/// two chunks. Nothing is deleted on cancel.
+pub fn download_cancellable(
+    file: &ModelFile,
+    dest_dir: &Path,
+    base_url: Option<&str>,
+    cancel: &AtomicBool,
+    progress: &mut dyn FnMut(u64, u64),
+) -> Result<PathBuf> {
     fs::create_dir_all(dest_dir).with_context(|| format!("create {}", dest_dir.display()))?;
     let final_path = dest_dir.join(file.name);
     let part_path = dest_dir.join(format!("{}.part", file.name));
@@ -159,6 +192,9 @@ pub fn download(
     if has_size(&final_path, file.bytes) && verify(&final_path, file).is_ok() {
         progress(file.bytes, file.bytes);
         return Ok(final_path);
+    }
+    if cancel.load(Ordering::SeqCst) {
+        return Err(Cancelled.into());
     }
 
     let url = match base_url {
@@ -217,6 +253,10 @@ pub fn download(
     let mut done = offset;
     progress(done, file.bytes);
     loop {
+        if cancel.load(Ordering::SeqCst) {
+            out.flush().ok();
+            return Err(Cancelled.into());
+        }
         let n = match reader.read(&mut buf) {
             Ok(0) => break,
             Ok(n) => n,
@@ -248,6 +288,27 @@ pub fn download(
         );
     }
     finish(file, &part_path, &final_path)
+}
+
+/// Downloads every file in `files` into `dest_dir`, in order, after checking that the volume has room for the
+/// bytes still missing plus [`DISK_MARGIN`] (see [`ensure_disk_space`]). `progress` receives the file name and
+/// `(downloaded, total)`. Stops with [`Cancelled`] when `cancel` is set; finished files stay, partial ones resume.
+pub fn download_all(
+    files: &[ModelFile],
+    dest_dir: &Path,
+    base_url: Option<&str>,
+    cancel: &AtomicBool,
+    progress: &mut dyn FnMut(&str, u64, u64),
+) -> Result<Vec<PathBuf>> {
+    ensure_disk_space(dest_dir, files)?;
+    let mut paths = Vec::with_capacity(files.len());
+    for file in files {
+        let path = download_cancellable(file, dest_dir, base_url, cancel, &mut |done, total| {
+            progress(file.name, done, total)
+        })?;
+        paths.push(path);
+    }
+    Ok(paths)
 }
 
 /// Checks a complete `.part` (size, then SHA-256) and renames it to its final name.

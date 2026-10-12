@@ -62,3 +62,9 @@ progress{width:140px;vertical-align:middle;margin-left:8px}
 #folders .hint{font-size:12px;margin:4px 0 0 22px;padding:0}
 #folders .setting button{margin:6px 0 0 22px}
 #syncNow{white-space:nowrap}
+.banner{display:flex;align-items:center;gap:12px;margin:8px 12px 0;padding:8px 12px;border-radius:8px;font-size:13px;background:var(--line);color:var(--fg)}
+.banner.error{background:#fbe3e1;color:#7a1d14}
+.banner.notice{background:#e6f0fb;color:#17365d}
+.banner span{flex:1;word-break:break-word}
+.banner button{font:inherit;padding:2px 8px}
+#cancelDl{margin-left:6px}

@@ -405,3 +405,67 @@ fn locate_honours_digup_models_and_ignores_wrong_size() {
         assert_eq!(locate(&other), None, "snapshot file has the wrong size");
     }
 }
+
+#[test]
+fn cancel_before_start_is_reported_and_leaves_no_part() {
+    let data = content(300_000);
+    let file = model_for(&data);
+    let server = serve(data.clone(), false);
+    let dir = tempfile::tempdir().unwrap();
+    let cancel = std::sync::atomic::AtomicBool::new(true);
+
+    let err = digup_models::download_cancellable(
+        &file,
+        dir.path(),
+        Some(&server.base),
+        &cancel,
+        &mut |_, _| {},
+    )
+    .unwrap_err();
+
+    assert!(digup_models::is_cancelled(&err), "{err:#}");
+    assert!(
+        server.ranges().is_empty(),
+        "no request may be made after an early cancel"
+    );
+    assert!(!dir.path().join(format!("{NAME}.part")).exists());
+    assert!(!dir.path().join(NAME).exists());
+}
+
+#[test]
+fn cancel_mid_download_keeps_part_and_resume_completes() {
+    let data = content(3_000_000);
+    let file = model_for(&data);
+    let server = serve(data.clone(), false);
+    let dir = tempfile::tempdir().unwrap();
+    let cancel = std::sync::atomic::AtomicBool::new(false);
+
+    // Raise the flag as soon as some bytes arrived but before the file is complete.
+    let err = digup_models::download_cancellable(
+        &file,
+        dir.path(),
+        Some(&server.base),
+        &cancel,
+        &mut |d, total| {
+            if d > 0 && d < total {
+                cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        },
+    )
+    .unwrap_err();
+
+    assert!(digup_models::is_cancelled(&err), "{err:#}");
+    let part = dir.path().join(format!("{NAME}.part"));
+    let kept = fs::metadata(&part).expect("part kept").len();
+    assert!(kept > 0 && kept < data.len() as u64, "kept {kept}");
+    assert!(!dir.path().join(NAME).exists());
+
+    // A later run without the flag resumes from the kept bytes and verifies.
+    let path = download(&file, dir.path(), Some(&server.base), &mut |_, _| {}).unwrap();
+    assert_eq!(fs::read(&path).unwrap(), data);
+    assert_eq!(
+        server.ranges().last().unwrap(),
+        &Some(format!("bytes={kept}-"))
+    );
+    verify(&path, &file).unwrap();
+}
