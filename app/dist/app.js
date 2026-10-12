@@ -59,7 +59,7 @@
 
   // Kind filter chips: "All" (empty selection) or any set of kind ids. Remembered in localStorage.
   const KIND_IDS = ["screenshot", "image", "pdf", "doc", "audio", "video"];
-  const KIND_KEY = "digup.kinds";
+  const KIND_KEY = "dtfu.kinds";
   let kindSel = [];
   try {
     const saved = JSON.parse(localStorage.getItem(KIND_KEY) || "[]");

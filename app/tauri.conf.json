@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "DigUp",
+  "productName": "Dig-the-f-up",
   "version": "0.1.0",
-  "identifier": "com.digup.rs",
+  "identifier": "io.github.delirious6423.digthefup",
   "build": {
     "frontendDist": "./dist"
   },
@@ -11,7 +11,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "DigUp",
+        "title": "Dig-the-f-up",
         "width": 760,
         "height": 640,
         "resizable": true

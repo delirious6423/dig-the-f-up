@@ -1,6 +1,6 @@
 # DigUp indexing pipeline: Rust porting spec
 
-Source: /root/digup-src (NOT /home/claude/digup-src; that path does not exist). Read-only analysis, repo untouched.
+Source: /root/dtfu-src (NOT /home/claude/dtfu-src; that path does not exist). Read-only analysis, repo untouched.
 Citation form: `File.swift:line` (files under Sources/DigUpKit unless a prefix is given). "Unsure" flags are marked UNSURE.
 Embedding model, search/ranking, and the SQLite store are out of scope except where the pipeline touches them.
 

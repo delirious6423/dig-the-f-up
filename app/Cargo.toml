@@ -1,5 +1,5 @@
 [package]
-name = "digup-app"
+name = "dtfu-app"
 version = "0.1.0"
 edition = "2021"
 publish = false
@@ -11,10 +11,10 @@ publish = false
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-digup-engine = { path = "../crates/digup-engine" }
-digup-models = { path = "../crates/digup-models" }
-digup-text = { path = "../crates/digup-text" }
-digup-extract-pdf = { path = "../crates/digup-extract-pdf" }
+dtfu-engine = { path = "../crates/dtfu-engine" }
+dtfu-models = { path = "../crates/dtfu-models" }
+dtfu-text = { path = "../crates/dtfu-text" }
+dtfu-extract-pdf = { path = "../crates/dtfu-extract-pdf" }
 url = "2"
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"

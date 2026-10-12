@@ -1,0 +1,30 @@
+[package]
+name = "dtfu-index"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = ["llama"]
+# Implements `Embed` for the real llama.cpp embedder. Off for fast tests with a fake embedder.
+llama = ["dep:dtfu-embed"]
+# OCR through LightOnOCR-3 (selected at run time with DTFU_OCR=lighton; models: see dtfu-models).
+lighton = ["dtfu-ocr/lighton"]
+
+[dependencies]
+anyhow.workspace = true
+rayon.workspace = true
+dtfu-core.workspace = true
+dtfu-crawl = { path = "../dtfu-crawl" }
+dtfu-store = { path = "../dtfu-store" }
+dtfu-text = { path = "../dtfu-text" }
+dtfu-extract-text = { path = "../dtfu-extract-text" }
+dtfu-extract-image = { path = "../dtfu-extract-image" }
+dtfu-extract-audio = { path = "../dtfu-extract-audio" }
+dtfu-extract-pdf = { path = "../dtfu-extract-pdf" }
+dtfu-extract-video = { path = "../dtfu-extract-video" }
+dtfu-ocr = { path = "../dtfu-ocr" }
+dtfu-embed = { path = "../dtfu-embed", optional = true }
+serde_json = "1"
+blake3 = "1"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }

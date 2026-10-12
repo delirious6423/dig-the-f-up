@@ -1,4 +1,4 @@
-# digup-rs
+# dig-the-f-up
 
 A cross-platform (macOS, Windows, Linux), performance-first Rust port of [DigUp](https://github.com/ARahim3/DigUp):
 search your files by what's in them (photos, PDFs, documents, audio, video, code) with Google DeepMind's
@@ -23,10 +23,10 @@ release packaging (see `app/README.md`).
 
 ```bash
 scripts/link-models.sh && scripts/build-llama.sh      # once: finds the two GGUF files, builds llama.cpp with Metal
-cargo build --release -p digup-cli
-export DIGUP_MODELS=$PWD/models
-target/release/digup index --index ~/.digup ~/Documents
-target/release/digup search --index ~/.digup "a penguin on the ice"
+cargo build --release -p dtfu-cli
+export DTFU_MODELS=$PWD/models
+target/release/dtfu index --index ~/.digup ~/Documents
+target/release/dtfu search --index ~/.digup "a penguin on the ice"
 ```
 
 Licence: MIT. Based on DigUp (MIT) and llama.cpp (MIT); the model is EmbeddingGemma 2 (Apache 2.0). See `NOTICE`.

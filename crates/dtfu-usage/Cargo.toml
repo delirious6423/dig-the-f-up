@@ -1,0 +1,14 @@
+[package]
+name = "dtfu-usage"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Local open-usage log and frecency scores for Dig-the-f-up (separate SQLite file, never the index DBs)"
+
+[dependencies]
+anyhow.workspace = true
+rusqlite.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

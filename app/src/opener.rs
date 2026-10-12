@@ -46,7 +46,7 @@ pub enum Request {
 /// plain when there is none (always plain for page 1, as `landmark_find` says).
 pub fn pdf_request(page: usize, texts: &[String], query: &str) -> Request {
     let words: Vec<String> = query.split_whitespace().map(str::to_string).collect();
-    match digup_text::landmark_find(page, texts, &words) {
+    match dtfu_text::landmark_find(page, texts, &words) {
         Some(word) => Request::Search(word),
         None => Request::Plain,
     }
@@ -116,7 +116,7 @@ pub fn open_at(app: &AppHandle, path: &Path, kind: &str, loc: Option<f64>, query
 
 #[cfg(target_os = "macos")]
 fn pdf_request_for(path: &Path, page: usize, query: &str) -> Request {
-    let Ok(doc) = digup_extract_pdf::PdfDoc::open(path) else {
+    let Ok(doc) = dtfu_extract_pdf::PdfDoc::open(path) else {
         return Request::Plain;
     };
     if doc.page_count() < page {

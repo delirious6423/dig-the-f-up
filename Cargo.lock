@@ -450,257 +450,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "digup-cli"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "digup-core",
- "digup-crawl",
- "digup-embed",
- "digup-engine",
- "digup-extract-pdf",
- "digup-extract-video",
- "digup-index",
- "digup-mcp",
- "digup-models",
- "digup-search",
- "digup-store",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "digup-core"
-version = "0.1.0"
-
-[[package]]
-name = "digup-crawl"
-version = "0.1.0"
-dependencies = [
- "rayon",
- "regex",
- "tempfile",
-]
-
-[[package]]
-name = "digup-embed"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "digup-core",
- "digup-llama-sys",
- "image",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "digup-engine"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "digup-core",
- "digup-embed",
- "digup-index",
- "digup-models",
- "digup-search",
- "digup-store",
- "digup-usage",
- "digup-watch",
- "serde",
- "serde_json",
- "tempfile",
-]
-
-[[package]]
-name = "digup-extract-audio"
-version = "0.1.0"
-dependencies = [
- "hound",
- "rubato",
- "symphonia",
-]
-
-[[package]]
-name = "digup-extract-image"
-version = "0.1.0"
-dependencies = [
- "fast_image_resize",
- "image",
- "kamadak-exif",
- "tempfile",
- "xattr",
-]
-
-[[package]]
-name = "digup-extract-pdf"
-version = "0.1.0"
-dependencies = [
- "objc2",
- "objc2-core-foundation",
- "objc2-core-graphics",
- "objc2-foundation",
- "objc2-pdf-kit",
- "pdfium-render",
- "unicode-normalization",
-]
-
-[[package]]
-name = "digup-extract-text"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "digup-core",
- "digup-crawl",
- "ego-tree",
- "encoding_rs",
- "ignore",
- "quick-xml",
- "regex",
- "scraper",
- "serde_json",
- "tempfile",
- "unicode-segmentation",
- "zip",
-]
-
-[[package]]
-name = "digup-extract-video"
-version = "0.1.0"
-dependencies = [
- "digup-extract-image",
- "image",
- "serde_json",
- "tempfile",
-]
-
-[[package]]
-name = "digup-index"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "blake3",
- "digup-core",
- "digup-crawl",
- "digup-embed",
- "digup-extract-audio",
- "digup-extract-image",
- "digup-extract-pdf",
- "digup-extract-text",
- "digup-extract-video",
- "digup-ocr",
- "digup-store",
- "digup-text",
- "image",
- "rayon",
- "serde_json",
-]
-
-[[package]]
-name = "digup-llama-sys"
-version = "0.1.0"
-dependencies = [
- "bindgen",
-]
-
-[[package]]
-name = "digup-mcp"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "digup-engine",
- "digup-index",
- "serde",
- "serde_json",
- "tempfile",
-]
-
-[[package]]
-name = "digup-models"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "dirs",
- "libc",
- "sha2",
- "tempfile",
- "ureq",
-]
-
-[[package]]
-name = "digup-ocr"
-version = "0.1.0"
-dependencies = [
- "ab_glyph",
- "digup-llama-sys",
- "digup-models",
- "dirs",
- "image",
- "objc2",
- "objc2-core-graphics",
- "objc2-foundation",
- "objc2-vision",
- "ocrs",
- "rten",
-]
-
-[[package]]
-name = "digup-search"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "digup-core",
- "digup-store",
- "digup-text",
- "half",
- "rayon",
- "rusqlite",
- "serde_json",
- "tempfile",
- "unicode-normalization",
- "unicode-segmentation",
-]
-
-[[package]]
-name = "digup-store"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "digup-core",
- "digup-text",
- "half",
- "rayon",
- "rusqlite",
- "serde_json",
-]
-
-[[package]]
-name = "digup-text"
-version = "0.1.0"
-dependencies = [
- "unicode-normalization",
- "unicode-segmentation",
-]
-
-[[package]]
-name = "digup-usage"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "rusqlite",
- "tempfile",
-]
-
-[[package]]
-name = "digup-watch"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "notify",
- "tempfile",
-]
-
-[[package]]
 name = "dirs"
 version = "6.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -749,6 +498,257 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d4b8a88685455ed29a21542a33abd9cb6510b6b129abadabdcef0f4c55bc8f61"
 dependencies = [
  "litrs",
+]
+
+[[package]]
+name = "dtfu-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "dtfu-core",
+ "dtfu-crawl",
+ "dtfu-embed",
+ "dtfu-engine",
+ "dtfu-extract-pdf",
+ "dtfu-extract-video",
+ "dtfu-index",
+ "dtfu-mcp",
+ "dtfu-models",
+ "dtfu-search",
+ "dtfu-store",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "dtfu-core"
+version = "0.1.0"
+
+[[package]]
+name = "dtfu-crawl"
+version = "0.1.0"
+dependencies = [
+ "rayon",
+ "regex",
+ "tempfile",
+]
+
+[[package]]
+name = "dtfu-embed"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "dtfu-core",
+ "dtfu-llama-sys",
+ "image",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "dtfu-engine"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "dtfu-core",
+ "dtfu-embed",
+ "dtfu-index",
+ "dtfu-models",
+ "dtfu-search",
+ "dtfu-store",
+ "dtfu-usage",
+ "dtfu-watch",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "dtfu-extract-audio"
+version = "0.1.0"
+dependencies = [
+ "hound",
+ "rubato",
+ "symphonia",
+]
+
+[[package]]
+name = "dtfu-extract-image"
+version = "0.1.0"
+dependencies = [
+ "fast_image_resize",
+ "image",
+ "kamadak-exif",
+ "tempfile",
+ "xattr",
+]
+
+[[package]]
+name = "dtfu-extract-pdf"
+version = "0.1.0"
+dependencies = [
+ "objc2",
+ "objc2-core-foundation",
+ "objc2-core-graphics",
+ "objc2-foundation",
+ "objc2-pdf-kit",
+ "pdfium-render",
+ "unicode-normalization",
+]
+
+[[package]]
+name = "dtfu-extract-text"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "dtfu-core",
+ "dtfu-crawl",
+ "ego-tree",
+ "encoding_rs",
+ "ignore",
+ "quick-xml",
+ "regex",
+ "scraper",
+ "serde_json",
+ "tempfile",
+ "unicode-segmentation",
+ "zip",
+]
+
+[[package]]
+name = "dtfu-extract-video"
+version = "0.1.0"
+dependencies = [
+ "dtfu-extract-image",
+ "image",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "dtfu-index"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "blake3",
+ "dtfu-core",
+ "dtfu-crawl",
+ "dtfu-embed",
+ "dtfu-extract-audio",
+ "dtfu-extract-image",
+ "dtfu-extract-pdf",
+ "dtfu-extract-text",
+ "dtfu-extract-video",
+ "dtfu-ocr",
+ "dtfu-store",
+ "dtfu-text",
+ "image",
+ "rayon",
+ "serde_json",
+]
+
+[[package]]
+name = "dtfu-llama-sys"
+version = "0.1.0"
+dependencies = [
+ "bindgen",
+]
+
+[[package]]
+name = "dtfu-mcp"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "dtfu-engine",
+ "dtfu-index",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "dtfu-models"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "dirs",
+ "libc",
+ "sha2",
+ "tempfile",
+ "ureq",
+]
+
+[[package]]
+name = "dtfu-ocr"
+version = "0.1.0"
+dependencies = [
+ "ab_glyph",
+ "dirs",
+ "dtfu-llama-sys",
+ "dtfu-models",
+ "image",
+ "objc2",
+ "objc2-core-graphics",
+ "objc2-foundation",
+ "objc2-vision",
+ "ocrs",
+ "rten",
+]
+
+[[package]]
+name = "dtfu-search"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "dtfu-core",
+ "dtfu-store",
+ "dtfu-text",
+ "half",
+ "rayon",
+ "rusqlite",
+ "serde_json",
+ "tempfile",
+ "unicode-normalization",
+ "unicode-segmentation",
+]
+
+[[package]]
+name = "dtfu-store"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "dtfu-core",
+ "dtfu-text",
+ "half",
+ "rayon",
+ "rusqlite",
+ "serde_json",
+]
+
+[[package]]
+name = "dtfu-text"
+version = "0.1.0"
+dependencies = [
+ "unicode-normalization",
+ "unicode-segmentation",
+]
+
+[[package]]
+name = "dtfu-usage"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "rusqlite",
+ "tempfile",
+]
+
+[[package]]
+name = "dtfu-watch"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "notify",
+ "tempfile",
 ]
 
 [[package]]

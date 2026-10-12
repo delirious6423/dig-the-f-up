@@ -3,12 +3,12 @@
 <plist version="1.0">
 <dict>
     <key>NSAppleEventsUsageDescription</key>
-    <string>DigUp sends Apple Events to Preview, PDF apps, QuickTime Player or IINA to open a search result at the matching page or time.</string>
+    <string>Dig-the-f-up sends Apple Events to Preview, PDF apps, QuickTime Player or IINA to open a search result at the matching page or time.</string>
     <key>NSDesktopFolderUsageDescription</key>
-    <string>DigUp reads files in Desktop folders that you choose to index.</string>
+    <string>Dig-the-f-up reads files in Desktop folders that you choose to index.</string>
     <key>NSDocumentsFolderUsageDescription</key>
-    <string>DigUp reads files in Documents folders that you choose to index.</string>
+    <string>Dig-the-f-up reads files in Documents folders that you choose to index.</string>
     <key>NSDownloadsFolderUsageDescription</key>
-    <string>DigUp reads files in Downloads folders that you choose to index.</string>
+    <string>Dig-the-f-up reads files in Downloads folders that you choose to index.</string>
 </dict>
 </plist>

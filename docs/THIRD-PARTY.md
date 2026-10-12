@@ -7,13 +7,13 @@ and the build scripts; the bundle contents were not inspected after a release bu
 
 | Component | Version / source | License | How it is included |
 | --- | --- | --- | --- |
-| llama.cpp (with mtmd) | b11461 plus `patches/llama.cpp-no-logits.patch` (from DigUp) | MIT | Static libraries from `scripts/build-llama.sh`, linked by `crates/digup-llama-sys` (its build script links `ggml-metal` on Apple targets). |
+| llama.cpp (with mtmd) | b11461 plus `patches/llama.cpp-no-logits.patch` (from DigUp) | MIT | Static libraries from `scripts/build-llama.sh`, linked by `crates/dtfu-llama-sys` (its build script links `ggml-metal` on Apple targets). |
 | Rust crates | see the table below and `scripts/gen-third-party-licenses.sh` | per crate | Compiled in (static). |
 
 ## Apple system frameworks (linked, not shipped)
 
 Linked from the macOS SDK; they are part of macOS and are not in the bundle: Accelerate, Metal, MetalKit, Foundation
-(`crates/digup-llama-sys/build.rs`) and PDFKit (PDF text and rendering, `crates/digup-extract-pdf`). Other system
+(`crates/dtfu-llama-sys/build.rs`) and PDFKit (PDF text and rendering, `crates/dtfu-extract-pdf`). Other system
 frameworks reached through the Tauri and `objc2-*` crates are also system-provided; the full set was not enumerated.
 
 ## Not bundled
@@ -21,7 +21,7 @@ frameworks reached through the Tauri and `objc2-*` crates are also system-provid
 | Item | Why it is not in the app |
 | --- | --- |
 | EmbeddingGemma 2 model (`embeddinggemma-2-Q8_0.gguf`, `mmproj-embeddinggemma-2-Q8_0.gguf`) | Downloaded at run time from the pinned Hugging Face revision into the data folder. Not in the `.app`. Model license: Apache 2.0 (Google DeepMind). |
-| ffmpeg / ffprobe | Video metadata and frames are read by running the `ffmpeg` and `ffprobe` programs that the user has installed (`crates/digup-extract-video`). Not bundled. Without them, video files cannot be indexed (`VideoError::Missing`, "ffmpeg not found"). |
+| ffmpeg / ffprobe | Video metadata and frames are read by running the `ffmpeg` and `ffprobe` programs that the user has installed (`crates/dtfu-extract-video`). Not bundled. Without them, video files cannot be indexed (`VideoError::Missing`, "ffmpeg not found"). |
 | pdfium | Used only on non-macOS builds, or on macOS with the `pdfium` feature for tests. The macOS app uses PDFKit. Not bundled. |
 | DigUp (Swift) | Not included. Its MIT copyright notice is kept in `NOTICE`. |
 

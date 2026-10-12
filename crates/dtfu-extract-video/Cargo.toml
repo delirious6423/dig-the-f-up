@@ -1,0 +1,13 @@
+[package]
+name = "dtfu-extract-video"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+dtfu-extract-image = { path = "../dtfu-extract-image" }
+image = { version = "0.25", default-features = false }
+serde_json = "1"
+
+[dev-dependencies]
+tempfile.workspace = true

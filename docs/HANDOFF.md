@@ -1,4 +1,4 @@
-# digup-rs handoff
+# dig-the-f-up handoff
 
 This document hands a running project from a Claude session (cloud workspace, Linux x86, 2 cores, no GPU) to a Claude
 Code session on the owner's Apple Silicon Mac. You are expected to **continue autonomously to a finished, shippable
@@ -110,33 +110,33 @@ test included); `cargo clippy --workspace --all-targets --release` is clean. The
 
 | Crate | Status | Notes |
 |---|---|---|
-| `digup-core`, `digup-text` | done | enums/consts/prompts; text normalization, tokenizer helpers (NFKC, Arabic folding, `is_word_char` keeps virama/combining marks) |
-| `digup-store` | done | `IndexStore` (schema v5, insert/requeue/move/delete/prune/adopt/finish, `add_segments_and_finish` single transaction), NEON/AVX2/AVX-512/lanes scan kernels (x86 kernels UNTESTED: no AVX2 under Rosetta) |
-| `digup-search` | done | `Searcher` (z-score fusion, FTS, code index with `CodeLookup`/focus); same top-10 order as Swift on all 126 eval queries |
-| `digup-crawl` | done | now reads the macOS `kMDItemIsScreenCapture` xattr |
-| `digup-extract-text/-image/-audio` | done | docs (RTF honours `\fcharset`/`\ansicpg`), code, images, audio. Gaps: legacy `.doc` unsupported; lossy audio untested |
-| `digup-extract-pdf` | macOS only | PDFKit via objc2, rotation handled; other OSes return Unsupported until pdfium is wired |
-| `digup-extract-video` | stopgap | shells out to ffmpeg/ffprobe, streams frames and dedups while reading; frame interval 3.0 s hardcoded in options |
-| `digup-ocr` | macOS only | Apple Vision via objc2; other OSes return None (Q4: `ocrs`/Windows.Media.Ocr still to do) |
-| `digup-embed`, `digup-llama-sys` | done | Metal parity 1.000; `examples/bench_embed` |
-| `digup-index` | done | `sync`, `prepare`, `commit`, `run` (rayon prepare + one embed thread), `service` (scheduler loop for the app) |
-| `digup-models` | done | locate + resumable verified download; `digup download` |
-| `digup-cli` | partly | `index`, `search` (`--json`, `code:`), `status`, `eval`, `estimate`, `download`. Missing: `index-service` front end (library exists), `worker` (not needed: the embedder runs in-process) |
+| `dtfu-core`, `dtfu-text` | done | enums/consts/prompts; text normalization, tokenizer helpers (NFKC, Arabic folding, `is_word_char` keeps virama/combining marks) |
+| `dtfu-store` | done | `IndexStore` (schema v5, insert/requeue/move/delete/prune/adopt/finish, `add_segments_and_finish` single transaction), NEON/AVX2/AVX-512/lanes scan kernels (x86 kernels UNTESTED: no AVX2 under Rosetta) |
+| `dtfu-search` | done | `Searcher` (z-score fusion, FTS, code index with `CodeLookup`/focus); same top-10 order as Swift on all 126 eval queries |
+| `dtfu-crawl` | done | now reads the macOS `kMDItemIsScreenCapture` xattr |
+| `dtfu-extract-text/-image/-audio` | done | docs (RTF honours `\fcharset`/`\ansicpg`), code, images, audio. Gaps: legacy `.doc` unsupported; lossy audio untested |
+| `dtfu-extract-pdf` | macOS only | PDFKit via objc2, rotation handled; other OSes return Unsupported until pdfium is wired |
+| `dtfu-extract-video` | stopgap | shells out to ffmpeg/ffprobe, streams frames and dedups while reading; frame interval 3.0 s hardcoded in options |
+| `dtfu-ocr` | macOS only | Apple Vision via objc2; other OSes return None (Q4: `ocrs`/Windows.Media.Ocr still to do) |
+| `dtfu-embed`, `dtfu-llama-sys` | done | Metal parity 1.000; `examples/bench_embed` |
+| `dtfu-index` | done | `sync`, `prepare`, `commit`, `run` (rayon prepare + one embed thread), `service` (scheduler loop for the app) |
+| `dtfu-models` | done | locate + resumable verified download; `digup download` |
+| `dtfu-cli` | partly | `index`, `search` (`--json`, `code:`), `status`, `eval`, `estimate`, `download`. Missing: `index-service` front end (library exists), `worker` (not needed: the embedder runs in-process) |
 
 Evidence (details and commands in `docs/BENCHMARKS.md`): eval ALL R@1/R@5 equals the Swift app on synthetic 0.95/1.00,
 multilingual 0.92/0.98 and code 1.00/1.00; Chinese (simp+trad) 0.92/1.00; first index pass of the small testbed 25 s
 vs 38.8 s Swift; Metal is 3.4-6.3x faster than CPU-only on this M4.
 
-**Update 2026-10-12:** E2 desktop shell exists in `app/` (Tauri 2, static front end): search, kind chips, thumbnails, first-run welcome panel, folder/pause controls, model download, open-at-PDF-page / QuickTime / IINA moment (compile- and unit-tested only), unsigned arm64 `.app` bundle builds (`app/README.md`). Search keyword stage is 54x faster at 1M segments with identical rankings (BENCHMARKS B3). Off-Mac backends written but never run against the real libraries: pdfium (`digup-extract-pdf/src/pdfium.rs`, set `DIGUP_PDFIUM_DIR`, no cwd search) and `ocrs` OCR (`digup-ocr/src/ocrs_backend.rs`, set `DIGUP_OCR_MODELS`; model URLs in its module doc); both compile-check for x86_64-linux. Still open: x86 scan kernels on real hardware (compile-checked for x86_64-linux only), Windows/Linux, signing/notarization, the GUI has not been exercised end to end with a model.
+**Update 2026-10-12:** E2 desktop shell exists in `app/` (Tauri 2, static front end): search, kind chips, thumbnails, first-run welcome panel, folder/pause controls, model download, open-at-PDF-page / QuickTime / IINA moment (compile- and unit-tested only), unsigned arm64 `.app` bundle builds (`app/README.md`). Search keyword stage is 54x faster at 1M segments with identical rankings (BENCHMARKS B3). Off-Mac backends written but never run against the real libraries: pdfium (`dtfu-extract-pdf/src/pdfium.rs`, set `DTFU_PDFIUM_DIR`, no cwd search) and `ocrs` OCR (`dtfu-ocr/src/ocrs_backend.rs`, set `DTFU_OCR_MODELS`; model URLs in its module doc); both compile-check for x86_64-linux. Still open: x86 scan kernels on real hardware (compile-checked for x86_64-linux only), Windows/Linux, signing/notarization, the GUI has not been exercised end to end with a model.
 
-**Next, in order:** (1) E2 desktop shell (Tauri 2, Q3 default) on top of `digup_index::service` and `digup-search`;
+**Next, in order:** (1) E2 desktop shell (Tauri 2, Q3 default) on top of `dtfu_index::service` and `dtfu-search`;
 (2) E3 Windows/Linux: pdfium (Q5), OCR backends (Q4), ffmpeg bundling, x86 scan kernels on real hardware, run the new
 `.github/workflows/ci.yml` (never run yet; Windows job is allowed to fail); (3) larger-corpus benchmarks (real photos/PDFs,
 100k+ vectors) and profiling with samply; (4) E4 packaging. Image/audio embedding is GPU-bound (about 0.22 s per 140-token
 image on Metal), so the remaining levers are in llama.cpp/mtmd batching, not in our code.
 
 **Needs the owner:** git remote / repo name and visibility (Q2); whether to commit the uncommitted work; LICENSE holder
-name (placeholder "digup-rs contributors"); a Windows/Linux machine or CI to verify non-Mac builds.
+name (placeholder "dig-the-f-up contributors"); a Windows/Linux machine or CI to verify non-Mac builds.
 
 ---------------------------------------------------------------------------------------------------
 
@@ -180,7 +180,7 @@ scripts/build-llama.sh            # clones llama.cpp b11461, applies the patch, 
 cargo test --workspace --release  # expect: 2+4+26+6 unit tests and the parity test passing
 ```
 Then **confirm the parity test passes on Metal** (it was only run on x86 CPU). Expect cosines >= 0.9995. If linking
-fails on macOS, fix `crates/digup-llama-sys/build.rs` (frameworks, `c++`, missing `ggml-blas`/`ggml-metal` libs) and
+fails on macOS, fix `crates/dtfu-llama-sys/build.rs` (frameworks, `c++`, missing `ggml-blas`/`ggml-metal` libs) and
 re-run. If a vector is below 0.999 on Metal, stop and investigate before building anything else.
 Note: when the Mac's GPU is used, `Options::gpu_layers=999` offloads everything and `mtmd` runs with `use_gpu=true`.
 The model's activations overflow in F16, so never switch these GGUFs for F16 variants.
@@ -193,17 +193,17 @@ If you also want the Swift baseline CLI, copy (don't move) the GGUFs to `~/Libra
 
 ```
 Layering (each crate independently testable):
-digup-core      types/constants (done)
-digup-store     IndexStore (writes, sync, move detection, reset/adopt, fingerprint), Searcher, vector scan (partial)
-digup-crawl     (done)
-digup-extract   readers -> segments: image, pdf, doc, audio, video, code, ocr; chunking; hasWords/PageTextProblem
-digup-embed     (done) + an EmbedPool/worker wrapper so the app can run it in a child process that exits when idle
-digup-index     pipeline orchestration: crawl -> prepare (rayon) -> embed (single GPU thread, batched) -> commit;
+dtfu-core      types/constants (done)
+dtfu-store     IndexStore (writes, sync, move detection, reset/adopt, fingerprint), Searcher, vector scan (partial)
+dtfu-crawl     (done)
+dtfu-extract   readers -> segments: image, pdf, doc, audio, video, code, ocr; chunking; hasWords/PageTextProblem
+dtfu-embed     (done) + an EmbedPool/worker wrapper so the app can run it in a child process that exits when idle
+dtfu-index     pipeline orchestration: crawl -> prepare (rayon) -> embed (single GPU thread, batched) -> commit;
                 pause/resume, power policy, long-file stepping, backfill
-digup-search    (or inside store) z-score fusion, FTS query building, text normalization (NFKC, Arabic folding)
-digup-cli       `digup estimate|index|search|status|eval|worker|index-service` (mirror the Swift CLI; same JSON-lines
+dtfu-search    (or inside store) z-score fusion, FTS query building, text normalization (NFKC, Arabic folding)
+dtfu-cli       `digup estimate|index|search|status|eval|worker|index-service` (mirror the Swift CLI; same JSON-lines
                 worker protocol so tools can be shared)
-digup-app       desktop shell (see Open Question Q3): tray, global hotkey, search panel, results, onboarding, settings
+dtfu-app       desktop shell (see Open Question Q3): tray, global hotkey, search panel, results, onboarding, settings
 ```
 Process model to keep from DigUp: indexing in-process or in a helper; the **query encoder is a separate lightweight
 mode** (`Embedder::new(text, None, ..)`, 512-token context, ~250 MB) so memory returns to the OS when idle. Improvement
@@ -223,7 +223,7 @@ over Swift: keep it resident while the panel is likely to be used and unload aft
 | Global hotkey, tray, panel | AppKit | Tauri 2 (`tauri-plugin-global-shortcut`, tray) or `tao`+`wry`/`egui` |
 | Open at page/moment, reveal, Quick Look | Preview/QuickTime | per-OS `open` equivalents; PDF page via `file://...#page=N` where supported; editor `--goto` for code |
 | Auto-update | Sparkle | Tauri updater (optional) |
-| File type database | UTType | extension + magic-byte tables (done in `digup-crawl`) |
+| File type database | UTType | extension + magic-byte tables (done in `dtfu-crawl`) |
 | Cloud placeholders | `SF_DATALESS` | Windows `FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS` / OneDrive attrs |
 
 ---------------------------------------------------------------------------------------------------
@@ -240,7 +240,7 @@ Parallelism guidance is in italics. Use subagents per CLAUDE.md. After each phas
 - A3. `git init` and make a first commit if the owner agrees (they haven't asked yet; ask once, with a recommended yes).
 
 **Phase B. Storage and search (parallel with C and D)**
-- B1. `digup-store::IndexStore`: port `IndexStore.swift` (insert file/segments+fts in one transaction, delete (fts first),
+- B1. `dtfu-store::IndexStore`: port `IndexStore.swift` (insert file/segments+fts in one transaction, delete (fts first),
   move detection, pending queue ordering, reset/adopt with fingerprint, `info` JSON handling, counts). Use
   `prepare_cached`, WAL, and batch inserts. *Acceptance:* port `IndexStoreTests.swift` and `LongFilesTests` store parts.
 - B2. `Searcher`: exact port of spec-store-search s2 (z-score per modality with one global std floor 0.02, FTS OR-query,
@@ -263,11 +263,11 @@ Parallelism guidance is in italics. Use subagents per CLAUDE.md. After each phas
   *Acceptance:* the "tests worth porting" list in spec-pipeline s6 plus the added gaps listed there.
 
 **Phase D. Pipeline and CLI**
-- D1. `digup-index`: crawl -> prepare (rayon, bounded channel) -> single embed thread (batch text up to 16 seq/2048 tok;
+- D1. `dtfu-index`: crawl -> prepare (rayon, bounded channel) -> single embed thread (batch text up to 16 seq/2048 tok;
   batch images; group media across files where the model allows) -> commit transactions. Pause/resume via SQLite state.
   Long-file stepping (30 pages / 40 chunks per step, idle backfill, 5,000 caps). Power policy. Fingerprint check.
   *Acceptance:* `LongFilesTests` ported with a FakeEmbedder; end-to-end index of the testbed.
-- D2. `digup-cli`: `estimate`, `index`, `search`, `status`, `eval`, `worker`, `index-service` with the JSON-lines
+- D2. `dtfu-cli`: `estimate`, `index`, `search`, `status`, `eval`, `worker`, `index-service` with the JSON-lines
   protocol in spec-embedder s4. *Acceptance:* eval R@1/R@5/R@10/MRR within noise of the Swift CLI on the same corpus
   (English, Bengali, Arabic, code). Document any regression and its cause (OCR is the likely one off-Mac).
 - D3. Benchmarks: compare against the Swift baseline on identical corpus, per modality and total; update
@@ -349,7 +349,7 @@ Before reporting any milestone:
   behind a trait, add Windows.Media.Ocr and macOS Vision backends, pick defaults by eval results.
 - **Q5. Distribution of pdfium/ffmpeg:** bundle vs require system install. *Recommended:* bundle pdfium; use a bundled
   ffmpeg binary (LGPL build) for video, with `symphonia` for audio-only.
-- **Q6. Naming/branding:** this is a port of DigUp; the owner hasn't chosen a name. *Recommended:* keep `digup-rs` as the
+- **Q6. Naming/branding:** this is a port of DigUp; the owner hasn't chosen a name. *Recommended:* keep `dig-the-f-up` as the
   working name and don't ship a rename without asking.
 
 ---------------------------------------------------------------------------------------------------
@@ -358,7 +358,7 @@ Before reporting any milestone:
 
 1. Read DigUp's README and `Package.swift` (GitHub blocks automated browsing of `Sources/`, so the source was cloned).
 2. Gave the speed-up thesis (section 3). The owner said "let's kick things off".
-3. Cloned DigUp to `/root/digup-src` (now `reference/digup-swift`). Three parallel read-only agents wrote the three
+3. Cloned DigUp to `/root/dtfu-src` (now `reference/digup-swift`). Three parallel read-only agents wrote the three
    specs in `docs/`. Findings that shaped the plan: `llama-cpp-2` too old (D2), serial prepare stage, per-file media
    embedding, WAV round-trip, double screenshot decode.
 4. Scaffolded the workspace; benchmarked the scan; built llama.cpp b11461 with the patch (CPU); wrote bindings and the

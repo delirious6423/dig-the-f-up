@@ -25,7 +25,7 @@ and after).
 1. Quit other heavy apps (builds, browsers with many tabs, sync clients). Note the load: `uptime`. The load average
    is a confound: other processes add CPU power. Mark any run with load above about 4 as loaded.
 2. Pick one folder inside a watched root for the edits and PDF scenarios, for example
-   `~/Documents/digup-power`. It must be inside the folder DigUp watches, or the watcher will not react.
+   `~/Documents/dtfu-power`. It must be inside the folder DigUp watches, or the watcher will not react.
 3. Pick one large PDF, 50 MB or more if you can, for example `~/Downloads/big.pdf`. Copy it nowhere; the script
    copies it itself.
 4. Make sure the index is idle: wait until DigUp shows no indexing activity before starting.
@@ -35,12 +35,12 @@ and after).
 Run one configuration at a time. Each full run is about 6 minutes (3 scenarios x 2 min, plus the prompts).
 
 ```bash
-cd ~/Claude/digup-rs        # or wherever the repo is
-sudo EDIT_DIR="$HOME/Documents/digup-power" PDF_SRC="$HOME/Downloads/big.pdf" \
-  scripts/bench-power.sh "$HOME/digup-power/<config-name>" "<label>" 24
+cd ~/Claude/dig-the-f-up        # or wherever the repo is
+sudo EDIT_DIR="$HOME/Documents/dtfu-power" PDF_SRC="$HOME/Downloads/big.pdf" \
+  scripts/bench-power.sh "$HOME/dtfu-power/<config-name>" "<label>" 24
 ```
 
-- `OUT_DIR`: a new folder per configuration, for example `~/digup-power/watch-on-plugged-resident`.
+- `OUT_DIR`: a new folder per configuration, for example `~/dtfu-power/watch-on-plugged-resident`.
 - `LABEL`: the configuration in words, for example `watcher=on policy=plugged_in model=resident`.
 - `SAMPLES`: 24 gives 2 minutes per scenario (the default). Use 48 for a longer, steadier average.
 - The script waits for Enter before each scenario, so you can set the app up first.
@@ -60,7 +60,7 @@ Three factors. Run the full set for each row you care about; the minimum useful 
 | 4 | on | plugged_in | not resident | cost of keeping the model in memory versus loading it per query. **No switch exists yet**: DigUp has no setting that unloads the model between queries. Skip this row unless one is added, and then record the change in the label |
 
 "Power policy" is the DigUp watch policy stored in the settings file as `live`, `plugged_in` or `manual`
-(`crates/digup-engine/src/lib.rs`). `plugged_in` indexes only on AC power, `live` whenever the Mac is awake. Set it in
+(`crates/dtfu-engine/src/lib.rs`). `plugged_in` indexes only on AC power, `live` whenever the Mac is awake. Set it in
 the app before each run. `manual` is not in the matrix: the watcher does nothing on its own, so it is the same as
 "watcher off" for this purpose. Keep the Mac on AC power for the `plugged_in` runs and on
 battery for the `live` runs, and record which in the label.
@@ -98,9 +98,9 @@ loaded.
   raw file: the powermetrics output format changes between macOS versions, so the parser may need a new pattern.
 - The `pdf` scenario actually indexed the PDF: check the DigUp status during the window. A PDF that finishes in
   the first 30 seconds makes the window mostly idle.
-- The `edits` scenario changed the files: `EDIT_DIR` held 20 `digup-power-bench-*.txt` files while it ran.
+- The `edits` scenario changed the files: `EDIT_DIR` held 20 `dtfu-power-bench-*.txt` files while it ran.
 - Battery percentage barely moves in 2 minutes. Read the power source and the CPU/GPU figures, not the battery.
-- The script removes only files it created (`digup-power-bench-*`) and the copied PDF. Check `EDIT_DIR` afterwards.
+- The script removes only files it created (`dtfu-power-bench-*`) and the copied PDF. Check `EDIT_DIR` afterwards.
 
 ## Verdict
 

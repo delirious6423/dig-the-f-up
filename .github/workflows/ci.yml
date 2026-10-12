@@ -48,5 +48,5 @@ jobs:
       - name: Tests (model-dependent tests skip when the GGUF files are absent)
         run: cargo test --workspace --release
       - name: Clippy
-        # May fail until warnings in crates/digup-search/src/filters.rs are fixed.
+        # May fail until warnings in crates/dtfu-search/src/filters.rs are fixed.
         run: cargo clippy --workspace --all-targets --release -- -D warnings

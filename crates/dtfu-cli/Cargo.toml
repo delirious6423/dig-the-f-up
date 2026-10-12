@@ -1,0 +1,30 @@
+[package]
+name = "dtfu-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "dtfu"
+path = "src/main.rs"
+
+[features]
+# Lets `DTFU_OCR=lighton` select the LightOnOCR-3 engine during indexing.
+lighton = ["dtfu-index/lighton"]
+
+[dependencies]
+anyhow = { workspace = true }
+dtfu-core = { workspace = true }
+dtfu-crawl = { path = "../dtfu-crawl" }
+dtfu-embed = { path = "../dtfu-embed" }
+dtfu-engine = { path = "../dtfu-engine" }
+dtfu-mcp = { path = "../dtfu-mcp" }
+dtfu-extract-pdf = { path = "../dtfu-extract-pdf" }
+dtfu-extract-video = { path = "../dtfu-extract-video" }
+dtfu-models = { path = "../dtfu-models" }
+dtfu-index = { path = "../dtfu-index" }
+dtfu-search = { path = "../dtfu-search" }
+dtfu-store = { path = "../dtfu-store" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

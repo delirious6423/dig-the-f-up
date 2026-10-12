@@ -1,5 +1,5 @@
 #!/bin/bash
-# bench-power.sh: CPU/GPU power (powermetrics) and battery state for three DigUp scenarios.
+# bench-power.sh: CPU/GPU power (powermetrics) and battery state for three Dig-the-f-up scenarios.
 #
 # Run it yourself in a Terminal window (powermetrics needs root):
 #   sudo scripts/bench-power.sh OUT_DIR [LABEL] [SAMPLES]
@@ -31,8 +31,8 @@ Environment:
   PDF_SRC     large PDF to copy into EDIT_DIR for the pdf scenario (required for that scenario)
   SCENARIOS   space-separated subset of: idle edits pdf (default: "idle edits pdf")
 Example:
-  sudo EDIT_DIR="$HOME/Documents/digup-bench" PDF_SRC="$HOME/Downloads/big.pdf" \
-    scripts/bench-power.sh "$HOME/digup-power/watch-on-plugged" "watcher=on policy=plugged_in model=resident" 24
+  sudo EDIT_DIR="$HOME/Documents/dtfu-bench" PDF_SRC="$HOME/Downloads/big.pdf" \
+    scripts/bench-power.sh "$HOME/dtfu-power/watch-on-plugged" "watcher=on policy=plugged_in model=resident" 24
 EOF
     exit 2
 }
@@ -75,9 +75,9 @@ if [ ! -f "$SUMMARY" ]; then
     echo "label,scenario,samples,cpu_mw_avg,gpu_mw_avg,combined_mw_avg,batt_before,batt_after,source_after,load1_before,load1_after,started" > "$SUMMARY"
 fi
 
-# Removes only the files this script creates (prefix digup-power-bench-).
+# Removes only the files this script creates (prefix dtfu-power-bench-).
 cleanup_files() {
-    [ -n "$EDIT_DIR" ] && rm -f "$EDIT_DIR"/digup-power-bench-* 2>/dev/null
+    [ -n "$EDIT_DIR" ] && rm -f "$EDIT_DIR"/dtfu-power-bench-* 2>/dev/null
 }
 trap 'cleanup_files; echo; echo "interrupted; bench files removed" >&2; exit 130' INT TERM
 
@@ -107,13 +107,13 @@ run_edits() {
     [ "$gap" -ge 1 ] || gap=1
     i=1
     while [ "$i" -le 20 ]; do
-        printf 'digup power bench, file %02d, initial line\n' "$i" > "$EDIT_DIR/digup-power-bench-$(printf %02d "$i").txt"
+        printf 'dtfu power bench, file %02d, initial line\n' "$i" > "$EDIT_DIR/dtfu-power-bench-$(printf %02d "$i").txt"
         i=$(( i + 1 ))
     done
     sleep 2
     i=1
     while [ "$i" -le 20 ]; do
-        printf 'edit %02d at %s\n' "$i" "$(date +%H:%M:%S)" >> "$EDIT_DIR/digup-power-bench-$(printf %02d "$i").txt"
+        printf 'edit %02d at %s\n' "$i" "$(date +%H:%M:%S)" >> "$EDIT_DIR/dtfu-power-bench-$(printf %02d "$i").txt"
         sleep "$gap"
         i=$(( i + 1 ))
     done
@@ -125,7 +125,7 @@ run_scenario() {
     echo
     echo "== scenario: $s ($LABEL, $SAMPLES samples = ${window} s) =="
     case "$s" in
-        idle)  echo "Leave DigUp open with the watcher on. Do not touch the Mac or the watched folders." ;;
+        idle)  echo "Leave Dig-the-f-up open with the watcher on. Do not touch the Mac or the watched folders." ;;
         edits) echo "The script writes 20 small text files in $EDIT_DIR, then edits each one during the window." ;;
         pdf)   echo "The script copies $PDF_SRC into $EDIT_DIR during the window, then removes it." ;;
     esac
@@ -144,14 +144,14 @@ run_scenario() {
             run_edits "$window" &
             ;;
         pdf)
-            ( sleep 5; cp "$PDF_SRC" "$EDIT_DIR/digup-power-bench-large.pdf" ) &
+            ( sleep 5; cp "$PDF_SRC" "$EDIT_DIR/dtfu-power-bench-large.pdf" ) &
             ;;
     esac
     powermetrics --samplers cpu_power,gpu_power -i 5000 -n "$SAMPLES" > "$OUT_DIR/$s.powermetrics.txt" 2> "$OUT_DIR/$s.powermetrics.stderr.txt"
     rc=$?
     wait
-    [ "$s" = pdf ] && rm -f "$EDIT_DIR/digup-power-bench-large.pdf"
-    [ "$s" = edits ] && rm -f "$EDIT_DIR"/digup-power-bench-*.txt
+    [ "$s" = pdf ] && rm -f "$EDIT_DIR/dtfu-power-bench-large.pdf"
+    [ "$s" = edits ] && rm -f "$EDIT_DIR"/dtfu-power-bench-*.txt
 
     uptime > "$OUT_DIR/$s.uptime-after.txt"
     pmset -g batt > "$OUT_DIR/$s.batt-after.txt"

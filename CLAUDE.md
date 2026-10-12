@@ -1,4 +1,4 @@
-# CLAUDE.md: digup-rs
+# CLAUDE.md: dig-the-f-up
 
 Cross-platform, maximum-performance Rust port of **DigUp** (https://github.com/ARahim3/DigUp, MIT): on-device semantic
 search over a user's files (photos, PDFs, documents, audio, video, code) with Google DeepMind's EmbeddingGemma 2.
@@ -24,9 +24,9 @@ expected to continue it autonomously to completion, not to start over or re-plan
 - Report outcomes in a sentence or two, with measured numbers. Don't narrate steps.
 
 ## Non-negotiables
-1. **The parity test is the safety net.** `cargo test -p digup-embed --release --test parity` must keep passing
-   (all 9 reference vectors at cosine >= 0.999 vs the Swift app's). Run it after any change to `digup-embed`,
-   `digup-llama-sys`, or `scripts/build-llama.sh`.
+1. **The parity test is the safety net.** `cargo test -p dtfu-embed --release --test parity` must keep passing
+   (all 9 reference vectors at cosine >= 0.999 vs the Swift app's). Run it after any change to `dtfu-embed`,
+   `dtfu-llama-sys`, or `scripts/build-llama.sh`.
 2. **Never use F16 GGUFs** for this model (activations overflow). Q8_0 files only, pinned HF revision `bfcd298...`.
 3. **Index compatibility:** SQLite schema v5, 768-d float16 L2-normalized vectors, same prompts. Don't change any of
    these without updating `docs/spec-store-search.md` and deciding the `vector_source` tag question (HANDOFF section 11).
@@ -40,11 +40,11 @@ expected to continue it autonomously to completion, not to start over or re-plan
 
 ## Layout
 ```
-crates/digup-core        shared enums, constants, prompts            (done, 2 tests)
-crates/digup-store       SQLite schema v5 + f16 vector scan          (partial, 4 tests, bench example)
-crates/digup-crawl       file rules, classification, parallel crawl  (done, 26 tests, bench example)
-crates/digup-llama-sys   bindgen + static link of llama.cpp b11461   (done)
-crates/digup-embed       safe embedder (text/image/audio) + Pillow-exact resizer (done, 6 tests + parity test)
+crates/dtfu-core        shared enums, constants, prompts            (done, 2 tests)
+crates/dtfu-store       SQLite schema v5 + f16 vector scan          (partial, 4 tests, bench example)
+crates/dtfu-crawl       file rules, classification, parallel crawl  (done, 26 tests, bench example)
+crates/dtfu-llama-sys   bindgen + static link of llama.cpp b11461   (done)
+crates/dtfu-embed       safe embedder (text/image/audio) + Pillow-exact resizer (done, 6 tests + parity test)
 docs/HANDOFF.md          START HERE
 docs/spec-pipeline.md    crawler/extractors/indexer spec, with Swift file:line citations
 docs/spec-embedder.md    llama.cpp call sequence, preprocessing, worker protocol, parity test
@@ -61,12 +61,12 @@ vendor/ build-llama/ target/ models/   generated or local, git-ignored
 scripts/link-models.sh            # finds/verifies the model files (looks in ~/Downloads first)
 scripts/build-llama.sh            # ~5-15 min once; Metal on macOS, CPU elsewhere; BACKEND=cuda|vulkan|hip
 cargo test --workspace --release  # everything, incl. the parity test (needs models + build-llama)
-cargo test -p digup-embed --release --test parity -- --nocapture   # the safety net, prints cosines
-cargo run --release -p digup-store --example bench_scan -- 200000
-cargo run --release -p digup-crawl --example crawl_bench -- <dir> [threads]
+cargo test -p dtfu-embed --release --test parity -- --nocapture   # the safety net, prints cosines
+cargo run --release -p dtfu-store --example bench_scan -- 200000
+cargo run --release -p dtfu-crawl --example crawl_bench -- <dir> [threads]
 ```
-`DIGUP_LLAMA_BUILD` / `DIGUP_LLAMA_SRC` override where `digup-llama-sys` looks for the build and headers.
-`DIGUP_MODELS` overrides where the parity test looks for the GGUF files.
+`DTFU_LLAMA_BUILD` / `DTFU_LLAMA_SRC` override where `dtfu-llama-sys` looks for the build and headers.
+`DTFU_MODELS` overrides where the parity test looks for the GGUF files.
 Use `RUSTFLAGS="-C target-cpu=native"` only for local benchmarks, never for shipped binaries (see HANDOFF section 9).
 
 ## Subagents (learned the hard way)

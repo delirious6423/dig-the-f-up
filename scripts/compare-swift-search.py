@@ -4,9 +4,9 @@
 import json, subprocess, sys, os, glob
 root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 swift = f"{root}/baseline/DigUp.app/Contents/Helpers/digup"
-rust = f"{root}/target/release/digup"
+rust = f"{root}/target/release/dtfu"
 index = f"{root}/baseline/index"
-env = dict(os.environ, DIGUP_MODELS=f"{root}/models")
+env = dict(os.environ, DTFU_MODELS=f"{root}/models")
 limit = int(sys.argv[1]) if len(sys.argv) > 1 else 10**9
 
 def run(exe, q, kinds=None):

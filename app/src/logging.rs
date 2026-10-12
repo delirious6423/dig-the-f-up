@@ -1,6 +1,6 @@
 //! A small local log file for the desktop app, std only.
 //!
-//! - One file: `<data>/logs/digup.log`. When it reaches [`MAX_BYTES`] (1 MiB) it is renamed to `digup.log.1`
+//! - One file: `<data>/logs/dtfu.log`. When it reaches [`MAX_BYTES`] (1 MiB) it is renamed to `dtfu.log.1`
 //!   (replacing the previous `.1`) and a new file starts. So at most about 2 MiB is kept.
 //! - One line per event: `2026-10-12T09:30:00Z ERROR message`, UTC.
 //! - Local only. Nothing is sent anywhere. Messages can contain file paths (the folders you index), so the file is
@@ -14,7 +14,7 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// The active log file name.
-pub const FILE_NAME: &str = "digup.log";
+pub const FILE_NAME: &str = "dtfu.log";
 /// Rotate once the active file reaches this size.
 pub const MAX_BYTES: u64 = 1024 * 1024;
 
@@ -139,7 +139,7 @@ mod tests {
         // 10 bytes against a 10-byte limit: rotates.
         assert!(rotate_if_needed(&p, 10).unwrap());
         assert!(!p.exists());
-        assert_eq!(fs::read(d.path().join("digup.log.1")).unwrap().len(), 10);
+        assert_eq!(fs::read(d.path().join("dtfu.log.1")).unwrap().len(), 10);
 
         // Second rotation replaces the old backup.
         append(&p, "first\n", 10).unwrap();
@@ -147,8 +147,8 @@ mod tests {
         append(&p, "after\n", 10).unwrap();
         assert_eq!(fs::read_to_string(&p).unwrap(), "after\n");
         // "first" (6 bytes) stays below the limit, so it shares a file with the next line; the third append rotates.
-        assert_eq!(fs::read_to_string(d.path().join("digup.log.1")).unwrap(), "first\n0123456789abcdef\n");
-        assert!(!d.path().join("digup.log.2").exists());
+        assert_eq!(fs::read_to_string(d.path().join("dtfu.log.1")).unwrap(), "first\n0123456789abcdef\n");
+        assert!(!d.path().join("dtfu.log.2").exists());
     }
 
     #[test]
@@ -157,7 +157,7 @@ mod tests {
         let p = d.path().join(FILE_NAME);
         append(&p, "small\n", 1024).unwrap();
         assert!(!rotate_if_needed(&p, 1024).unwrap());
-        assert!(!d.path().join("digup.log.1").exists());
+        assert!(!d.path().join("dtfu.log.1").exists());
         assert_eq!(fs::read_to_string(&p).unwrap(), "small\n");
     }
 

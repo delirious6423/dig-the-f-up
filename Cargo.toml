@@ -15,7 +15,7 @@ rayon = "1"
 rusqlite = { version = "0.32", features = ["bundled"] }
 regex = "1"
 tempfile = "3"
-digup-core = { path = "crates/digup-core" }
+dtfu-core = { path = "crates/dtfu-core" }
 
 [profile.release]
 opt-level = 3

@@ -1,10 +1,10 @@
-//! Minimal Tauri 2 desktop shell over `digup-engine`.
+//! Minimal Tauri 2 desktop shell over `dtfu-engine`.
 #![cfg_attr(all(not(debug_assertions), target_os = "windows"), windows_subsystem = "windows")]
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use digup_engine::{Engine, EngineConfig, EngineEvent, Hit, IndexCounts, Status, WatchPolicy};
+use dtfu_engine::{Engine, EngineConfig, EngineEvent, Hit, IndexCounts, Status, WatchPolicy};
 use serde::Serialize;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
@@ -139,7 +139,7 @@ fn event_json(ev: EngineEvent) -> serde_json::Value {
 }
 
 fn model_ok() -> bool {
-    digup_models::locate(&digup_models::TEXT).is_some() && digup_models::locate(&digup_models::MMPROJ).is_some()
+    dtfu_models::locate(&dtfu_models::TEXT).is_some() && dtfu_models::locate(&dtfu_models::MMPROJ).is_some()
 }
 
 #[tauri::command]
@@ -267,7 +267,7 @@ struct ModelInfo {
 
 #[tauri::command]
 fn model_info() -> ModelInfo {
-    let (text, mmproj) = (digup_models::TEXT.bytes, digup_models::MMPROJ.bytes);
+    let (text, mmproj) = (dtfu_models::TEXT.bytes, dtfu_models::MMPROJ.bytes);
     ModelInfo { total_bytes: text + mmproj, text_bytes: text, mmproj_bytes: mmproj }
 }
 
@@ -286,8 +286,8 @@ fn download_models(app: AppHandle) -> Res<()> {
             }
         }
         let _done = Done;
-        let dir = digup_models::models_dir();
-        let files = [digup_models::TEXT, digup_models::MMPROJ];
+        let dir = dtfu_models::models_dir();
+        let files = [dtfu_models::TEXT, dtfu_models::MMPROJ];
         let mut last: Option<(String, u64)> = None;
         let mut progress = |name: &str, done: u64, total: u64| {
             // Throttle to roughly every 256 KiB per file, always pass the final tick.
@@ -300,14 +300,14 @@ fn download_models(app: AppHandle) -> Res<()> {
                 let _ = app.emit("model-progress", serde_json::json!({"name": name, "done": done, "total": total}));
             }
         };
-        match digup_models::download_all(&files, &dir, None, &CANCEL, &mut progress) {
+        match dtfu_models::download_all(&files, &dir, None, &CANCEL, &mut progress) {
             Ok(_) => {
                 let _ = app.emit("model-ready", ());
                 if let Some(engine) = app.try_state::<Arc<Engine>>() {
                     let _ = engine.start_indexing();
                 }
             }
-            Err(e) if digup_models::is_cancelled(&e) => {
+            Err(e) if dtfu_models::is_cancelled(&e) => {
                 logging::info("model download cancelled; partial files kept");
                 let _ = app.emit("model-cancelled", "Download cancelled. Partial files are kept and will resume.");
             }
@@ -439,7 +439,7 @@ fn show_logs(app: &AppHandle) {
 }
 
 fn build_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
-    let app_menu = Submenu::with_items(app, "DigUp", true, &[&PredefinedMenuItem::hide(app, None)?, &PredefinedMenuItem::quit(app, None)?])?;
+    let app_menu = Submenu::with_items(app, "Dig-the-f-up", true, &[&PredefinedMenuItem::hide(app, None)?, &PredefinedMenuItem::quit(app, None)?])?;
     let show_logs = MenuItem::with_id(app, SHOW_LOGS, "Show Logs", true, None::<&str>)?;
     let help = Submenu::with_items(app, "Help", true, &[&show_logs])?;
     let edit = Submenu::with_items(
@@ -481,13 +481,13 @@ fn main() {
         })
         .setup(move |app| {
             use tauri_plugin_global_shortcut::GlobalShortcutExt;
-            let base = digup_models::app_data_dir();
+            let base = dtfu_models::app_data_dir();
             std::fs::create_dir_all(&base)?;
             // A log file that cannot be created must not stop the app; logging is then a no-op.
-            if let Err(e) = logging::init(&digup_models::logs_dir()) {
+            if let Err(e) = logging::init(&dtfu_models::logs_dir()) {
                 eprintln!("log file: {e}");
             }
-            logging::info(&format!("DigUp {} starting; data folder {}", env!("CARGO_PKG_VERSION"), base.display()));
+            logging::info(&format!("Dig-the-f-up {} starting; data folder {}", env!("CARGO_PKG_VERSION"), base.display()));
             let engine = Arc::new(Engine::open(EngineConfig { index_dir: base.join("index"), settings_file: base.join("settings.json") })?);
 
             // Forward engine events to the front end.
@@ -528,7 +528,7 @@ fn main() {
             pause, resume, model_present, model_info, download_models, cancel_download, open_hit, reveal_path, quit, thumbnail
         ])
         .build(tauri::generate_context!())
-        .expect("error while building DigUp")
+        .expect("error while building Dig-the-f-up")
         .run(|app, event| {
             // Dock click while the window is hidden brings it back (macOS).
             #[cfg(target_os = "macos")]

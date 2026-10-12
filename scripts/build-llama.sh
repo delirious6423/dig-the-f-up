@@ -51,7 +51,7 @@ esac
 # Shipped binaries must be built with NATIVE=0 (the portable baseline). CI sets NATIVE=0.
 if [[ "$OS" == Darwin ]]; then NATIVE="${NATIVE:-0}"; else NATIVE="${NATIVE:-1}"; fi
 FLAGS+=(-DGGML_NATIVE=$([[ "$NATIVE" == 1 ]] && echo ON || echo OFF))
-# OpenMP on Windows (MSVC vcomp / MinGW libgomp) would need an extra link step digup-llama-sys does not do; build without it.
+# OpenMP on Windows (MSVC vcomp / MinGW libgomp) would need an extra link step dtfu-llama-sys does not do; build without it.
 case "$OS" in MINGW*|MSYS*|CYGWIN*) IS_WIN=1 ;; *) IS_WIN=0 ;; esac
 [[ "$WIN_ENV" == Windows_NT ]] && IS_WIN=1
 [[ "$IS_WIN" == 1 ]] && FLAGS+=(-DGGML_OPENMP=OFF)
@@ -60,4 +60,4 @@ JOBS="$( (nproc || sysctl -n hw.ncpu || echo 4) 2>/dev/null | head -1)"
 echo "llama.cpp $TAG backend=$BACKEND native=$NATIVE jobs=$JOBS -> $BUILD"
 cmake -S "$SRC" -B "$BUILD" "${FLAGS[@]}" > "$BUILD.configure.log" 2>&1 || { tail -30 "$BUILD.configure.log"; exit 1; }
 cmake --build "$BUILD" --config Release -j "$JOBS" --target llama mtmd
-echo "done. Static libs are under $BUILD (cargo finds them via digup-llama-sys/build.rs)."
+echo "done. Static libs are under $BUILD (cargo finds them via dtfu-llama-sys/build.rs)."

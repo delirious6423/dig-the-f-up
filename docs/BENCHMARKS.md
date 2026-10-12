@@ -4,7 +4,7 @@
 
 Machine: owner's Apple Silicon Mac (arm64, macOS 26 / Darwin 25.5), llama.cpp b11461 built with Metal
 (`scripts/build-llama.sh`, deployment target 14.0).
-Command: `cargo test --workspace --release` (parity: `-p digup-embed --release --test parity -- --nocapture`).
+Command: `cargo test --workspace --release` (parity: `-p dtfu-embed --release --test parity -- --nocapture`).
 
 Cosine vs the Swift/Metal reference vectors (threshold 0.999):
 
@@ -95,9 +95,9 @@ Search parity on the SAME index: `scripts/compare-swift-search.py` runs all 126 
 
 Index time (synthetic + traps, first pass / long-file backfill / code index of 39 files): Rust 25.1 s / 6.3 s / 1.7 s; Swift 38.8 s total / 2.72 s code. One run each, small corpus.
 
-## D4. Embedding throughput (`cargo run --release -p digup-embed --example bench_embed`, M4 10 cores, n=1)
+## D4. Embedding throughput (`cargo run --release -p dtfu-embed --example bench_embed`, M4 10 cores, n=1)
 
-| workload | Metal (all layers) | CPU only (`DIGUP_GPU_LAYERS=0`) | Metal speed-up |
+| workload | Metal (all layers) | CPU only (`DTFU_GPU_LAYERS=0`) | Metal speed-up |
 |---|---|---|---|
 | text, 1800-char chunks, batches of 16 | 17.9 chunks/s | 5.3 chunks/s | 3.4x |
 | images, budget 140 (43 testbed photos) | 4.4 images/s | 0.9 images/s | 4.9x |
@@ -115,7 +115,7 @@ Setup: DigUp 0.6.0 release CLI (`DigUp.app/Contents/Helpers/digup`, arm64) index
 Result: `eval` output of `evals/synthetic.json` (37 q), `multilingual.json` (48 q) and `code.json` (41 q) is line-for-line identical after whitespace squeezing (R@1/R@5/R@10/MRR: 0.92/1.00/1.00/0.95, 0.90/0.98/0.98/0.93, 1.00 x4). `search` for three ad hoc queries gives the same hits in the same order. Known cosmetic difference: Arabic excerpt truncation can end one character earlier (grapheme vs `char` counting); the scan output of the SIMD kernel changes no ranking.
 Not covered: the x86 AVX2/AVX-512 kernels compile for `x86_64-unknown-linux-gnu` (scan.rs checked in a scratch crate) but have not run.
 
-## B3. Search at scale (`cargo run --release -p digup-search --example bench_search -- N`, Apple M4 10 cores, NEON, n=1, synthetic data)
+## B3. Search at scale (`cargo run --release -p dtfu-search --example bench_search -- N`, Apple M4 10 cores, NEON, n=1, synthetic data)
 
 Random unit vectors and a 2000-word synthetic vocabulary (70% text / 20% image / 10% audio segments, 1.5 segments per file), so the z-score candidate set and word frequencies are not realistic. Medians in ms.
 
@@ -124,7 +124,7 @@ Random unit vectors and a 2000-word synthetic vocabulary (70% text / 20% image /
 | 100k | 1.4 s | 0.25 GB | 0.09 s | 1.7 | 3.3 | 14.1 (was 50.7) | 6.7 (was 7.5) |
 | 1M | 33.7 s | 2.4 GB | 8.4-10.4 s | 17.1 | 39-46 | 138 (was 7504) | 72 (was 182) |
 
-The first FTS implementation joined every matched row into `segments` (341k rows for the common word at 1M); `keyword_stage` now takes the top 1000 rowids by bm25 from `fts` alone and joins only the rows it walks. Rankings are unchanged: `tests/fts_equivalence.rs` (seeded 20k segments, orphan rows, both caps, Arabic/Bengali, prefixes) compares against the kept legacy SQL, and `scripts/compare-swift-search.py` still gives 126/126 identical top-10. Set `DIGUP_SEARCH_TRACE=1` for per-stage timings. Swift's search was not measured at this scale (it was not run on a 1M index), so no speed-up over Swift is claimed here.
+The first FTS implementation joined every matched row into `segments` (341k rows for the common word at 1M); `keyword_stage` now takes the top 1000 rowids by bm25 from `fts` alone and joins only the rows it walks. Rankings are unchanged: `tests/fts_equivalence.rs` (seeded 20k segments, orphan rows, both caps, Arabic/Bengali, prefixes) compares against the kept legacy SQL, and `scripts/compare-swift-search.py` still gives 126/126 identical top-10. Set `DTFU_SEARCH_TRACE=1` for per-stage timings. Swift's search was not measured at this scale (it was not run on a 1M index), so no speed-up over Swift is claimed here.
 
 ## R1. Resident Searcher vs per-query build (2026-10-12, M4 10 cores, n=1 per size, synthetic data)
 
@@ -133,8 +133,8 @@ Build: `--release`, NEON. Rayon threads 10.
 
 Commands (same binary, one run per size):
 ```bash
-cargo run --release -q -p digup-search --example resident_bench -- 100000  --db <scratch>/resident-100k.sqlite --churn 30
-cargo run --release -q -p digup-search --example resident_bench -- 1000000 --db <scratch>/resident-1m.sqlite  --churn 30
+cargo run --release -q -p dtfu-search --example resident_bench -- 100000  --db <scratch>/resident-100k.sqlite --churn 30
+cargo run --release -q -p dtfu-search --example resident_bench -- 1000000 --db <scratch>/resident-1m.sqlite  --churn 30
 ```
 The synthetic DBs were deleted after each run. The DB is 70% text, 20% image, 10% audio, f16 768-d vectors.
 Fresh = `IndexStore::open` + `Searcher::new` per query (what the old engine did). Cached = one `OwnedSearcher` kept
@@ -184,7 +184,7 @@ results equal a fresh `Searcher`. It falls back to a full load when more than 25
 re-evaluated, and every 500 refreshes. Why not scan `(id, file)` of all segments: measured 45 ms at 100k rows
 (it touches every vector page), about the cost it was meant to avoid.
 
-Correctness: `crates/digup-search/tests/refresh_equivalence.rs`, 240 random mutation steps (1 to 3 mutations each: add
+Correctness: `crates/dtfu-search/tests/refresh_equivalence.rs`, 240 random mutation steps (1 to 3 mutations each: add
 file, delete file, re-embed with reused segment ids, later steps of a long pdf/doc with `info.pages` > 50 so the scale
 flags change, kind change, info-only change), 30 queries per step (vector-only, with text, kinds filter, lowered
 z gate) against a fresh `Searcher`, two refreshing searchers (default and never-fall-back): 7200 queries each,
@@ -194,7 +194,7 @@ rewritten-file vector check makes it fail at step 71, so the test does reach the
 Command (same binary; new vectors committed by another connection in one transaction, then refresh and a full
 open+load of the same state are timed, then 50 queries compared by `Debug` output):
 ```bash
-cargo build --release -p digup-search --example resident_bench
+cargo build --release -p dtfu-search --example resident_bench
 target/release/examples/resident_bench 100000  --only-refresh --db <scratch>/r100k.sqlite
 target/release/examples/resident_bench 1000000 --only-refresh --db <scratch>/r1m.sqlite
 ```
@@ -218,7 +218,7 @@ more than about 10x because the files scan and slot rebuild remain. The full reb
 faster than the 13 s of R1 phase 5, which ran under memory pressure; 1M numbers on this shared 16 GB box vary 2x to
 3x between runs, so the 1M rows are indicative, not final. The scan of the files table and the slot recompute could be
 made incremental if 0.2 s per commit at 1M turns out to matter. The path relies on the indexer's invariant that any
-delete or rewrite of a file's segments also rewrites or deletes its `files` row (checked in `digup-store/src/index.rs`);
+delete or rewrite of a file's segments also rewrites or deletes its `files` row (checked in `dtfu-store/src/index.rs`);
 the 500-refresh full reload bounds the damage if that is ever violated. No estimates in this section.
 
 Caveats added after review:
@@ -254,9 +254,9 @@ known strings; lower is better; markdown the model adds counts as error.
 Commands:
 ```
 swiftc -O evals/ocr/gen_corpus.swift -o /tmp/gen_corpus && /tmp/gen_corpus evals/ocr/corpus
-cargo build --release -p digup-ocr --features lighton --example ocr_bench
+cargo build --release -p dtfu-ocr --features lighton --example ocr_bench
 /usr/bin/time -l target/release/examples/ocr_bench evals/ocr/corpus 5 vision     # one process per engine, for peak RSS
-DIGUP_LIGHTON_MODELS=models/lightonocr /usr/bin/time -l target/release/examples/ocr_bench evals/ocr/corpus 5 lighton
+DTFU_LIGHTON_MODELS=models/lightonocr /usr/bin/time -l target/release/examples/ocr_bench evals/ocr/corpus 5 lighton
 ```
 The tool waits for 1-min load < 4 before timing and prints the highest load seen. n = 19 images x 5 runs = 95 timed runs per engine
 after one untimed warm-up call (model load).
@@ -272,11 +272,11 @@ ru_body 0.000 / 0.014; both exact on the other nine (en_body_light, en_dark_mode
 rotated_1_5deg, rotated_neg2_dark, screen_photo, zh_hans_body). The 2560x1440 image costs LightOn 4.4 s (more vision tokens). Model load
 about 1.7-2.5 s on first call.
 
-Cost of the abort callback (needed for the timeout) on Metal: LightOn run with `DIGUP_OCR_NO_ABORT=1` gave median 1.469 s / p95 2.104 s vs
+Cost of the abort callback (needed for the timeout) on Metal: LightOn run with `DTFU_OCR_NO_ABORT=1` gave median 1.469 s / p95 2.104 s vs
 1.476 s / 2.015 s with it (n=95 each, load 2.0-2.2): no measurable difference.
 
 **Retrieval** (`digup eval reference/digup-swift/evals/synthetic.json`, 37 queries, index of `~/DigUpTestbed/{synthetic,traps}` built
-with `DIGUP_OCR=vision` and `DIGUP_OCR=lighton`, `digup` built with `--features lighton`; earlier run, 12-image era, load 3.3-3.7): identical in
+with `DTFU_OCR=vision` and `DTFU_OCR=lighton`, `digup` built with `--features lighton`; earlier run, 12-image era, load 3.3-3.7): identical in
 both, ALL R@1 0.95 / R@5 1.00 / R@10 1.00 / MRR 0.97; screenshot tag (6 q) 0.83 / 1.00 / 1.00 / 0.92; exact tag (5 q) 1.00 everywhere.
 The set is saturated, so it cannot separate the engines. Indexing the 88 files: 35.8 s and 1.36 GB peak RSS (Vision) vs 70.1 s and 2.41 GB
 (LightOn), n=1. In that index LightOn returned more text for two screenshots: `shot_weather.png` 215 chars vs 101, and the Bengali
@@ -289,6 +289,6 @@ LightOn costs about 20x the time per image and 7x the memory, serialises to one 
 and as an LLM can silently rewrite text: in `code_dark` it changed `println!("{i}: {}", ...)` into `"{}: {}"`. Not shown by this data: any
 advantage on real screenshots or photos, any CPU/Windows/Linux behaviour, anything about `ocrs`.
 Provisional recommendation (to be revisited with real screenshots): keep Apple Vision as the macOS default; offer LightOn as an
-optional engine (`DIGUP_OCR=lighton`, feature `lighton`, about 1 GB of model files) for tiny text and scripts Vision lacks (Bengali
+optional engine (`DTFU_OCR=lighton`, feature `lighton`, about 1 GB of model files) for tiny text and scripts Vision lacks (Bengali
 looked much better in the retrieval index but is unmeasured); do not make it the default on cost alone. Open: measure `ocrs`, a
 Windows/Linux CPU run (the 1280 px non-macOS image cap is an unmeasured estimate), and a corpus of real screenshots.

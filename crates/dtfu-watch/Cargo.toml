@@ -1,0 +1,13 @@
+[package]
+name = "dtfu-watch"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+notify = "6"
+
+[dev-dependencies]
+tempfile.workspace = true

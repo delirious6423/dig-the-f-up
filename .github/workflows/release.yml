@@ -111,7 +111,7 @@ jobs:
         if: steps.secrets.outputs.signing == 'true'
         shell: bash
         run: |
-          app="app/target/release/bundle/macos/DigUp.app"
+          app="app/target/release/bundle/macos/Dig-the-f-up.app"
           codesign --verify --deep --strict --verbose=2 "$app"
           if [[ "${{ steps.secrets.outputs.notarize }}" == "true" ]]; then
             xcrun stapler validate "$app"
@@ -122,12 +122,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          app="app/target/release/bundle/macos/DigUp.app"
+          app="app/target/release/bundle/macos/Dig-the-f-up.app"
           test -d "$app"
           if [[ "${{ steps.secrets.outputs.signing }}" == "true" ]]; then
-            name="DigUp-${VERSION}-macos-arm64.zip"
+            name="Dig-the-f-up-${VERSION}-macos-arm64.zip"
           else
-            name="DigUp-${VERSION}-macos-arm64-UNSIGNED.zip"
+            name="Dig-the-f-up-${VERSION}-macos-arm64-UNSIGNED.zip"
           fi
           mkdir -p dist-out
           ditto -c -k --keepParent "$app" "dist-out/$name"
@@ -148,11 +148,11 @@ jobs:
           if [[ "${{ steps.secrets.outputs.signing }}" != "true" ]]; then
             notes="$notes
 
-UNSIGNED BUILD: macOS Gatekeeper will block it on first launch. Right-click DigUp.app and choose Open, or see docs/RELEASING.md."
+UNSIGNED BUILD: macOS Gatekeeper will block it on first launch. Right-click Dig-the-f-up.app and choose Open, or see docs/RELEASING.md."
           fi
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
             gh release upload "$GITHUB_REF_NAME" "$zip" "$sha" --clobber
           else
             gh release create "$GITHUB_REF_NAME" "$zip" "$sha" --draft --verify-tag \
-              --title "DigUp $GITHUB_REF_NAME" --notes "$notes"
+              --title "Dig-the-f-up $GITHUB_REF_NAME" --notes "$notes"
           fi
