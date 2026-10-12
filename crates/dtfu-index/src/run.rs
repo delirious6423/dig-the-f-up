@@ -409,7 +409,11 @@ impl Guard {
         let key = volume_key(&job.file.path);
         #[cfg(test)]
         if job.file.path.contains("/hang-late-") {
-            std::thread::sleep(Duration::from_millis(500)); // arrive after the first hang timed out
+            // Arrive after the first hang timed out: wait for it, not a fixed time (the pool may start this job first).
+            let until = Instant::now() + Duration::from_secs(5);
+            while !with_registry(|r| r.helpers.values().any(|(k, h)| *h && *k == key)) && Instant::now() < until {
+                std::thread::sleep(Duration::from_millis(20));
+            }
         }
         let Some(permit) = admit(&key) else {
             return unavailable("drive not responding".into());

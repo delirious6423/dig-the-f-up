@@ -200,7 +200,9 @@ fn datasets_are_dropped_unless_included_or_root() {
     let rep = crawl(&[r], &CrawlOptions::default());
     assert_eq!(names(&rep, r), vec!["clips/readme.txt"]);
     assert_eq!(rep.skipped["dataset"], 300);
-    assert_eq!(rep.datasets[&format!("{}/clips", r.display())], 300);
+    let clips = r.join("clips").display().to_string().replace('\\', "/");
+    let found: Vec<_> = rep.datasets.iter().map(|(k, n)| (k.replace('\\', "/"), *n)).collect();
+    assert_eq!(found, vec![(clips, 300)]);
     let rep = crawl(&[r], &CrawlOptions { include_datasets: true, ..Default::default() });
     assert_eq!(rep.candidates.len(), 301);
     let rep = crawl(&[r.join("clips")], &CrawlOptions::default()); // chosen roots are never datasets
