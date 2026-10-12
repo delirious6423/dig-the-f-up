@@ -127,26 +127,29 @@ pub fn lighton_base_url() -> String {
     format!("https://huggingface.co/{LIGHTON_REPOSITORY}/resolve/{LIGHTON_REVISION}")
 }
 
-/// Finds a present copy of a LightOnOCR file (size must match). With `$DIGUP_LIGHTON_MODELS` set only that folder
-/// is searched; otherwise `<models_dir>/lightonocr` (and `$DIGUP_MODELS/lightonocr`), then the Hugging Face
-/// snapshot of the pinned revision.
+/// Every place [`locate_lighton`] looks, in order: `$DIGUP_LIGHTON_MODELS` (if set), `<models_dir()>/lightonocr`
+/// (the standard models folder; `models_dir()` honours `$DIGUP_MODELS`), then the Hugging Face snapshot of the
+/// pinned revision.
+pub fn lighton_search_paths(file: &ModelFile) -> Vec<PathBuf> {
+    let mut v = Vec::new();
+    if let Some(dir) = env_dir(LIGHTON_ENV) {
+        v.push(dir.join(file.name));
+    }
+    v.push(models_dir().join("lightonocr").join(file.name));
+    if let Some(hub) = hf_hub_dir() {
+        v.push(
+            hub.join(format!("models--{}", LIGHTON_REPOSITORY.replace('/', "--")))
+                .join("snapshots")
+                .join(LIGHTON_REVISION)
+                .join(file.name),
+        );
+    }
+    v
+}
+
+/// Finds a present copy of a LightOnOCR file (size must match) in [`lighton_search_paths`].
 pub fn locate_lighton(file: &ModelFile) -> Option<PathBuf> {
-    let candidates: Vec<PathBuf> = match env_dir(LIGHTON_ENV) {
-        Some(dir) => vec![dir.join(file.name)],
-        None => {
-            let mut v = vec![models_dir().join("lightonocr").join(file.name)];
-            if let Some(hub) = hf_hub_dir() {
-                v.push(
-                    hub.join(format!("models--{}", LIGHTON_REPOSITORY.replace('/', "--")))
-                        .join("snapshots")
-                        .join(LIGHTON_REVISION)
-                        .join(file.name),
-                );
-            }
-            v
-        }
-    };
-    candidates.into_iter().find(|path| has_size(path, file.bytes))
+    lighton_search_paths(file).into_iter().find(|path| has_size(path, file.bytes))
 }
 
 /// Checks that `path` is a file of exactly `bytes` bytes. Symlinks are followed.
@@ -342,4 +345,16 @@ fn env_dir(key: &str) -> Option<PathBuf> {
     std::env::var_os(key)
         .filter(|v| !v.is_empty())
         .map(PathBuf::from)
+}
+
+#[cfg(test)]
+mod lighton_tests {
+    use super::*;
+
+    #[test]
+    fn search_paths_include_standard_folder() {
+        let paths = lighton_search_paths(&LIGHTON_TEXT);
+        let standard = models_dir().join("lightonocr").join(LIGHTON_TEXT.name);
+        assert!(paths.contains(&standard), "{paths:?}");
+    }
 }

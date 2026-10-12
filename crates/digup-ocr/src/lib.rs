@@ -80,15 +80,41 @@ impl Engine {
 /// Recognize text in a packed RGB8 image (`rgb.len() >= width*height*3`).
 /// Returns recognized lines joined by "\n", or `None` if nothing was found.
 /// Uses the engine named by `$DIGUP_OCR` ([`Engine::from_env`]); by default Apple Vision on macOS and `ocrs`
-/// elsewhere. If the selected engine is not compiled in, the platform default is used instead.
+/// elsewhere. If the selected engine is not compiled in, or is LightOn without usable model files, a warning is
+/// logged once and the platform default is used for that call.
 pub fn recognize_rgb(width: usize, height: usize, rgb: &[u8]) -> Option<String> {
     let engine = Engine::from_env();
-    let engine = if engine.is_compiled() { engine } else { Engine::platform_default() };
+    if !engine.is_compiled() {
+        warn_once(&format!(
+            "digup-ocr: {ENGINE_ENV}={} is not available in this build (feature missing); using {}",
+            engine.name(),
+            Engine::platform_default().name()
+        ));
+        return recognize_rgb_with(Engine::platform_default(), width, height, rgb);
+    }
+    #[cfg(feature = "lighton")]
+    if engine == Engine::Lighton {
+        if !valid_image(width, height, rgb) {
+            return None;
+        }
+        return match llama_backend::try_recognize(width, height, rgb) {
+            Ok(text) => text,
+            // Model files missing or unloadable (already logged): keep OCR working with the default engine.
+            Err(llama_backend::Unavailable) => recognize_rgb_with(Engine::platform_default(), width, height, rgb),
+        };
+    }
     recognize_rgb_with(engine, width, height, rgb)
 }
 
-/// Same contract as [`recognize_rgb`] with an explicit engine. `None` for invalid images, an engine that is not
-/// compiled in or lacks its models, and images with no text.
+fn warn_once(msg: &str) {
+    static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        eprintln!("{msg}");
+    }
+}
+
+/// Same contract as [`recognize_rgb`] with an explicit engine (no fallback: `None` for an engine that is not
+/// compiled in or lacks its models). `None` also for invalid images and images with no text.
 pub fn recognize_rgb_with(engine: Engine, width: usize, height: usize, rgb: &[u8]) -> Option<String> {
     if !valid_image(width, height, rgb) {
         return None;
@@ -340,7 +366,13 @@ mod lighton_tests {
 
     #[test]
     fn lighton_reads_hello_world() {
+        // Skips when the model files are absent, unless DIGUP_LIGHTON_TEST=1: then missing models FAIL the test,
+        // so CI / verification runs cannot pass without exercising real inference.
         if !lighton::available() {
+            assert!(
+                std::env::var("DIGUP_LIGHTON_TEST").as_deref() != Ok("1"),
+                "DIGUP_LIGHTON_TEST=1 but the LightOnOCR model files were not found"
+            );
             eprintln!("NOTE: LightOnOCR model files not found (DIGUP_LIGHTON_MODELS); skipping");
             return;
         }
