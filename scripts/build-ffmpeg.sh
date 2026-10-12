@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Builds Dig-the-f-up's own minimal, LGPL-only ffmpeg + ffprobe from source and places them where Tauri's
-# externalBin expects them: app/binaries/{ffmpeg,ffprobe}-<target-triple>[.exe].
+# externalBin expects them: app/binaries/dtfu-{ffmpeg,ffprobe}-<target-triple>[.exe].
 # Source tree and objects live in ./build-ffmpeg (git-ignored). The release tarball is pinned and SHA-256-checked.
 #
 #   scripts/build-ffmpeg.sh            # build (skipped when both outputs are newer than this script)
@@ -28,8 +28,9 @@ ARCH="$(uname -m)"
 TRIPLE="$(rustc -vV | sed -n 's/^host: //p')"
 EXE=""
 case "$OS" in MINGW*|MSYS*|CYGWIN*) EXE=".exe" ;; esac
-FF_OUT="$OUT/ffmpeg-$TRIPLE$EXE"
-FP_OUT="$OUT/ffprobe-$TRIPLE$EXE"
+# Prefixed names: a Linux .deb installs sidecars into /usr/bin, where plain "ffmpeg" would clash with the distro package.
+FF_OUT="$OUT/dtfu-ffmpeg-$TRIPLE$EXE"
+FP_OUT="$OUT/dtfu-ffprobe-$TRIPLE$EXE"
 
 if [[ -f "$FF_OUT" && -f "$FP_OUT" && "$FF_OUT" -nt "$SELF" && "$FP_OUT" -nt "$SELF" ]]; then
   echo "note: $FF_OUT and $FP_OUT are newer than $SELF; skipping rebuild (delete them to force one)."

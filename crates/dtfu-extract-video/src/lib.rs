@@ -134,11 +134,17 @@ fn tool_candidates(name: &str, windows: bool) -> Vec<String> {
     }
 }
 
-/// Locate a tool: first next to the running executable (the app bundles its own LGPL ffmpeg/ffprobe there, see
-/// scripts/build-ffmpeg.sh), then PATH, then the Homebrew prefixes.
+/// Locate a tool: first the app's own LGPL build next to the running executable, named `dtfu-<name>` (see
+/// scripts/build-ffmpeg.sh; prefixed so a Linux package never clashes with the distro's ffmpeg), then `<name>` on
+/// PATH, then the Homebrew prefixes.
 pub fn find_tool(name: &str) -> Option<PathBuf> {
-    let mut dirs: Vec<PathBuf> = std::env::current_exe().ok().and_then(|e| e.parent().map(Path::to_path_buf)).into_iter().collect();
-    dirs.extend(std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect::<Vec<_>>()).unwrap_or_default());
+    if let Some(dir) = std::env::current_exe().ok().and_then(|e| e.parent().map(Path::to_path_buf)) {
+        let bundled = tool_candidates(&format!("dtfu-{name}"), cfg!(windows)).into_iter().map(|n| dir.join(n)).find(|p| p.is_file());
+        if bundled.is_some() {
+            return bundled;
+        }
+    }
+    let mut dirs: Vec<PathBuf> = std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect()).unwrap_or_default();
     dirs.push("/opt/homebrew/bin".into());
     dirs.push("/usr/local/bin".into());
     let names = tool_candidates(name, cfg!(windows));

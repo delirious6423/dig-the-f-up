@@ -520,6 +520,10 @@ impl Engine {
     }
 
     pub fn add_folder(&self, p: PathBuf) -> Result<()> {
+        // One spelling per folder, matching the paths the crawler builds ("C:/x/" typed on Windows becomes "C:\\x").
+        #[cfg(windows)]
+        let p = PathBuf::from(p.to_string_lossy().replace('/', "\\"));
+        let p: PathBuf = p.components().collect();
         {
             let mut s = lock(&self.inner.settings);
             if s.folders.contains(&p) {

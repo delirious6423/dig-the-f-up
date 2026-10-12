@@ -36,6 +36,7 @@ fn candidate_dirs() -> Vec<PathBuf> {
         .and_then(|e| e.parent().map(Path::to_path_buf))
     {
         // Linux packages (deb, AppImage) put bundled resources in <prefix>/lib/<product name>, next to <prefix>/bin.
+        #[cfg(target_os = "linux")]
         dirs.push(dir.join("../lib/Dig-the-f-up"));
         dirs.push(dir);
     }

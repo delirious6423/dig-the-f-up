@@ -11,6 +11,6 @@ baseline/
 /CLAUDE.local.md
 /.local/
 build-ffmpeg/
-/app/binaries/ffmpeg-*
-/app/binaries/ffprobe-*
+/app/binaries/dtfu-ffmpeg-*
+/app/binaries/dtfu-ffprobe-*
 app/pdfium/
